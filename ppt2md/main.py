@@ -2,6 +2,9 @@
 
 import argparse
 import sys
+from pathlib import Path
+
+from ppt2md.parser.presentation import open_presentation, get_slide_count
 
 
 def main(argv=None):
@@ -19,7 +22,19 @@ def main(argv=None):
     )
 
     args = parser.parse_args(argv)
-    print(f"ppt2md: Converting {args.input} to Markdown")
+    input_path = Path(args.input)
+
+    if not input_path.exists():
+        print(f"Error: {input_path} does not exist", file=sys.stderr)
+        return 1
+
+    if input_path.suffix.lower() != ".pptx":
+        print(f"Error: {input_path} is not a .pptx file", file=sys.stderr)
+        return 1
+
+    prs = open_presentation(str(input_path))
+    count = get_slide_count(prs)
+    print(f"ppt2md: {input_path.name} contains {count} slide(s)")
     return 0
 
 
