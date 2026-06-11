@@ -82,3 +82,36 @@ def should_skip_shape(shape):
             return False
 
     return True
+
+
+def is_empty_slide(slide):
+    """Check if a slide has no meaningful content.
+
+    A slide is considered empty if it has no text, images, tables, or charts.
+
+    Args:
+        slide: python-pptx Slide object.
+
+    Returns:
+        bool: True if slide is empty.
+    """
+    for shape in slide.shapes:
+        # Check for images
+        if hasattr(shape, "image") and shape.image is not None:
+            return False
+
+        # Check for tables
+        if hasattr(shape, "has_table") and shape.has_table:
+            return False
+
+        # Check for charts
+        if hasattr(shape, "has_chart") and shape.has_chart:
+            return False
+
+        # Check for meaningful text (not just default placeholders)
+        if shape.has_text_frame:
+            skip, _ = filter_shape_text(shape)
+            if not skip:
+                return False
+
+    return True
