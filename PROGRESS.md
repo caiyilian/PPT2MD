@@ -2,15 +2,15 @@
 
 ## 当前状态
 
-- **已完成**：0 / 28 阶段
-- **当前阶段**：Phase 1 - Project Scaffolding
-- **最后更新**：初始状态
+- **已完成**：1 / 28 阶段
+- **当前阶段**：Phase 2 - Basic PPTX Parsing
+- **最后更新**：Phase 1 完成
 
 ## 阶段进度
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Project Scaffolding | [ ] |
+| 1 | Project Scaffolding | [x] |
 | 2 | Basic PPTX Parsing | [ ] |
 | 3 | Text Frame Extraction | [ ] |
 | 4 | Text Formatting to Markdown | [ ] |

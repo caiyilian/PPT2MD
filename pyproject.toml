@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ppt2md"
+version = "0.1.0"
+description = "Convert PowerPoint (.pptx) files to Markdown format"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+dependencies = [
+    "python-pptx>=0.6.21",
+    "Pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+windows = [
+    "pywin32>=300; sys_platform == 'win32'",
+]
+
+[project.scripts]
+ppt2md = "ppt2md.main:main"
+
+[tool.setuptools.packages.find]
+include = ["ppt2md*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "scratch"]
