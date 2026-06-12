@@ -186,6 +186,11 @@ def _add_text_box_shape(slide, meta, x, y, w, h, rotation):
     if text_meta:
         _apply_text(shape, text_meta)
 
+    # Apply body properties (wrap, autofit)
+    body_props = meta.get("body_props")
+    if body_props:
+        _apply_body_props(shape, body_props)
+
 
 def _add_auto_shape(slide, meta, x, y, w, h, rotation):
     """Add an auto shape (rectangle, rounded rect, etc.) with proper fill/line."""
@@ -566,6 +571,54 @@ def _apply_run_font_color(run, color_value):
             run.font.color.rgb = RGBColor.from_string(color_value)
         except Exception:
             pass
+
+
+def _apply_body_props(shape, body_props):
+    """Apply body properties (wrap, autofit) to a shape."""
+    try:
+        A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+        P_NS = 'http://schemas.openxmlformats.org/presentationml/2006/main'
+        # Try both A_NS and P_NS for txBody
+        txBody = shape._element.find('.//{%s}txBody' % A_NS)
+        if txBody is None:
+            txBody = shape._element.find('.//{%s}txBody' % P_NS)
+        if txBody is None:
+            return
+        bodyPr = txBody.find('{%s}bodyPr' % A_NS)
+        if bodyPr is None:
+            return
+
+        # Apply wrap attribute
+        wrap = body_props.get('wrap')
+        if wrap is not None:
+            bodyPr.set('wrap', wrap)
+
+        # Apply autofit
+        autofit = body_props.get('autofit')
+        if autofit == 'spAutoFit':
+            # Remove any existing autofit elements
+            for child in list(bodyPr):
+                if 'Autofit' in child.tag or 'autofit' in child.tag.lower():
+                    bodyPr.remove(child)
+            spAutoFit = etree.SubElement(bodyPr, '{%s}spAutoFit' % A_NS)
+        elif autofit == 'normAutofit':
+            for child in list(bodyPr):
+                if 'Autofit' in child.tag or 'autofit' in child.tag.lower():
+                    bodyPr.remove(child)
+            normAutofit = etree.SubElement(bodyPr, '{%s}normAutofit' % A_NS)
+            fontScale = body_props.get('fontScale')
+            lnSpcReduction = body_props.get('lnSpcReduction')
+            if fontScale is not None:
+                normAutofit.set('fontScale', str(fontScale))
+            if lnSpcReduction is not None:
+                normAutofit.set('lnSpcReduction', str(lnSpcReduction))
+        elif autofit == 'noAutofit':
+            for child in list(bodyPr):
+                if 'Autofit' in child.tag or 'autofit' in child.tag.lower():
+                    bodyPr.remove(child)
+            etree.SubElement(bodyPr, '{%s}noAutofit' % A_NS)
+    except Exception:
+        pass
 
 
 def _apply_text(shape, text_meta):

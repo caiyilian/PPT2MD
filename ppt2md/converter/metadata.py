@@ -196,6 +196,50 @@ def _get_text_info(shape):
     return {"paragraphs": paragraphs}
 
 
+def _get_body_props(shape):
+    """Extract bodyPr properties (wrap, autofit) from shape XML."""
+    try:
+        # Try both A_NS and P_NS for txBody
+        txBody = shape._element.find('.//{%s}txBody' % A_NS)
+        if txBody is None:
+            txBody = shape._element.find('.//{%s}txBody' % P_NS)
+        if txBody is None:
+            return None
+        # bodyPr is always in A_NS
+        bodyPr = txBody.find('{%s}bodyPr' % A_NS)
+        if bodyPr is None:
+            return None
+
+        props = {}
+        # wrap attribute
+        wrap = bodyPr.get('wrap')
+        if wrap is not None:
+            props['wrap'] = wrap
+
+        # autofit elements
+        spAutoFit = bodyPr.find('{%s}spAutoFit' % A_NS)
+        normAutofit = bodyPr.find('{%s}normAutofit' % A_NS)
+        noAutofit = bodyPr.find('{%s}noAutofit' % A_NS)
+
+        if spAutoFit is not None:
+            props['autofit'] = 'spAutoFit'
+        elif normAutofit is not None:
+            props['autofit'] = 'normAutofit'
+            # normAutofit may have fontScale and lnSpcReduction
+            fontScale = normAutofit.get('fontScale')
+            lnSpcReduction = normAutofit.get('lnSpcReduction')
+            if fontScale:
+                props['fontScale'] = int(fontScale)
+            if lnSpcReduction:
+                props['lnSpcReduction'] = int(lnSpcReduction)
+        elif noAutofit is not None:
+            props['autofit'] = 'noAutofit'
+
+        return props if props else None
+    except Exception:
+        return None
+
+
 def extract_shape_metadata(shape):
     """Extract comprehensive metadata for a shape.
 
@@ -238,6 +282,11 @@ def extract_shape_metadata(shape):
     line_info = _get_line_info(shape)
     if line_info:
         meta["line"] = line_info
+
+    # Body properties (wrap, autofit)
+    body_props = _get_body_props(shape)
+    if body_props:
+        meta["body_props"] = body_props
 
     # Text
     text_info = _get_text_info(shape)
