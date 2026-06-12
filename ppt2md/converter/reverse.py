@@ -257,14 +257,25 @@ def _add_image_shape(slide, meta, images_dir, x, y, w, h):
     """Add an image shape."""
     image_meta = meta.get("image", {})
     content_type = image_meta.get("content_type", "")
+    filename = image_meta.get("filename", "")
 
+    # Use stored filename if available
+    if filename and images_dir.exists():
+        img_path = Path(str(images_dir)) / filename
+        if img_path.exists():
+            try:
+                slide.shapes.add_picture(str(img_path), x, y, w, h)
+                return
+            except Exception:
+                pass
+
+    # Fallback: search by extension
     ext = ".png"
     if "jpeg" in content_type:
         ext = ".jpg"
     elif "gif" in content_type:
         ext = ".gif"
 
-    # Search for matching image in images directory
     if images_dir.exists():
         for img_file in images_dir.iterdir():
             if img_file.suffix.lower() in [ext, ".png", ".jpg", ".jpeg"]:

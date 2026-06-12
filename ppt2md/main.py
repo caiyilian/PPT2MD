@@ -111,9 +111,21 @@ def convert_pptx_to_markdown(input_path, output_dir=None, include_notes=False,
 
         sorted_shapes = sort_shapes_by_position(list(slide.shapes))
 
+        # Extract all images once to get filename mapping before metadata
+        from ppt2md.parser.image import extract_images_from_slide as extract_imgs
+        all_images = extract_imgs(slide, str(images_dir), slide_num, seen_rids)
+        img_filename_map = {}
+        for img_info in all_images:
+            img_filename_map[img_info["shape_index"]] = img_info["filename"]
+
         shape_metadata = []
         for shape in sorted_shapes:
             meta = extract_shape_metadata(shape)
+            # Inject image filename into metadata for correct roundtrip
+            if hasattr(shape, "image") and shape.image is not None:
+                idx = list(slide.shapes).index(shape)
+                if idx in img_filename_map and "image" in meta:
+                    meta["image"]["filename"] = img_filename_map[idx]
             shape_metadata.append(meta)
 
             shape_md = _process_shape(shape, slide, slide_num, images_dir, media_dir,
