@@ -18,6 +18,7 @@ def extract_text_from_slide(slide):
             text = para.text.strip()
             if not text:
                 continue
+            text = _strip_quotes(text)
             placeholder_idx = None
             if shape.is_placeholder:
                 placeholder_idx = shape.placeholder_format.idx
@@ -44,5 +45,16 @@ def extract_text_from_shape(shape):
     for para in shape.text_frame.paragraphs:
         text = para.text.strip()
         if text:
-            texts.append(text)
+            texts.append(_strip_quotes(text))
     return texts
+
+
+def _strip_quotes(text):
+    """Strip leading/trailing single or double quotes from text.
+
+    PPT sometimes wraps shape text in quotes in the XML.
+    """
+    if len(text) >= 2:
+        if (text[0] == "'" and text[-1] == "'") or (text[0] == '"' and text[-1] == '"'):
+            return text[1:-1]
+    return text

@@ -23,6 +23,27 @@ def extract_group_shapes(group_shape):
     return results
 
 
+def extract_group_texts(group_shape):
+    """Extract all text strings from a group shape recursively.
+
+    Args:
+        group_shape: python-pptx GroupShape object.
+
+    Returns:
+        list of text strings found in the group.
+    """
+    texts = []
+    for shape in group_shape.shapes:
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            texts.extend(extract_group_texts(shape))
+        elif shape.has_text_frame:
+            for para in shape.text_frame.paragraphs:
+                text = para.text.strip()
+                if text:
+                    texts.append(text)
+    return texts
+
+
 def extract_smartart_text(shape):
     """Extract text from a SmartArt shape via XML parsing.
 
@@ -36,17 +57,14 @@ def extract_smartart_text(shape):
         return []
 
     texts = []
-    # SmartArt text nodes are in dgm:cNvPr/dgm:txtBody or similar
     ns_map = {
         "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
         "dgm": "http://schemas.openxmlformats.org/drawingml/2006/diagram",
         "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
     }
 
-    # Find all text body elements in the shape's XML
     for elem in shape.element.iter():
         tag = elem.tag
-        # Match any text body paragraph
         if "txBody" in tag or "Body" in tag:
             for para in elem:
                 if "p" in para.tag.lower():
@@ -55,7 +73,6 @@ def extract_smartart_text(shape):
                         if "r" in run.tag.lower() or "t" in run.tag.lower():
                             if run.text:
                                 text_parts.append(run.text)
-                        # Also check for direct text in t elements
                         for t_elem in run.iter():
                             if t_elem.text and "t" in t_elem.tag.lower():
                                 text_parts.append(t_elem.text)
