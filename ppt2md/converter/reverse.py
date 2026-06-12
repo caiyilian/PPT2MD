@@ -164,22 +164,14 @@ def _add_text_box_shape(slide, meta, x, y, w, h, rotation):
 
     shape = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, x, y, w, h)
     shape.rotation = rotation
+    _remove_shape_effect(shape)
 
     # Text boxes have no fill and no line by default
     shape.fill.background()
 
     line_meta = meta.get("line")
     if line_meta:
-        width = line_meta.get("width", 0)
-        color = line_meta.get("color")
-        if width > 0 and color:
-            _apply_line(shape, line_meta)
-        elif color is None or width == 0:
-            # No visible line
-            try:
-                shape.line.fill.background()
-            except Exception:
-                pass
+        _apply_line(shape, line_meta)
     else:
         try:
             shape.line.fill.background()
@@ -217,6 +209,7 @@ def _add_auto_shape(slide, meta, x, y, w, h, rotation):
         shape = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, x, y, w, h)
 
     shape.rotation = rotation
+    _remove_shape_effect(shape)
 
     # Apply fill
     fill_meta = meta.get("fill")
@@ -232,15 +225,7 @@ def _add_auto_shape(slide, meta, x, y, w, h, rotation):
     # Apply line
     line_meta = meta.get("line")
     if line_meta:
-        width = line_meta.get("width", 0)
-        color = line_meta.get("color")
-        if width > 0 and color:
-            _apply_line(shape, line_meta)
-        elif color is None or width == 0:
-            try:
-                shape.line.fill.background()
-            except Exception:
-                pass
+        _apply_line(shape, line_meta)
     else:
         try:
             shape.line.fill.background()
@@ -300,6 +285,7 @@ def _add_line_shape(slide, meta, x, y, w, h, rotation):
         shape = slide.shapes.add_connector(
             MSO_CONNECTOR_TYPE.STRAIGHT, x, y, x + w, y + h
         )
+        _remove_shape_effect(shape)
     except Exception:
         from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
         shape = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, x, y, max(w, 1), max(h, 1))
@@ -378,11 +364,11 @@ def _apply_fill(shape, fill_meta):
         return
 
     if fill_type == "scheme":
-        _apply_scheme_fill(shape, color)
+        _apply_scheme_fill(shape, color, fill_meta.get("modifiers"))
         return
 
 
-def _apply_scheme_fill(shape, theme_color):
+def _apply_scheme_fill(shape, theme_color, modifiers=None):
     """Apply a theme/scheme color fill via XML.
 
     Example: <a:solidFill><a:schemeClr val="accent6"/></a:solidFill>
@@ -405,6 +391,10 @@ def _apply_scheme_fill(shape, theme_color):
         solid = etree.Element('{{{}}}solidFill'.format(A_NS))
         scheme = etree.SubElement(solid, '{{{}}}schemeClr'.format(A_NS))
         scheme.set('val', theme_color)
+        if modifiers:
+            for mod_name, mod_val in modifiers.items():
+                mod = etree.SubElement(scheme, '{{{}}}{}'.format(A_NS, mod_name))
+                mod.set('val', mod_val)
         spPr.insert(1, solid)  # After xfrm (index 0)
     except Exception:
         pass
@@ -426,6 +416,14 @@ def _apply_line(shape, line_meta):
     width = line_meta.get("width", 0)
     color = line_meta.get("color")
 
+    if color is None:
+        # No line
+        try:
+            shape.line.fill.background()
+        except Exception:
+            pass
+        return
+
     if width > 0:
         try:
             shape.line.width = width
@@ -437,22 +435,12 @@ def _apply_line(shape, line_meta):
             shape.line.color.rgb = RGBColor.from_string(color)
         except Exception:
             pass
-    elif color is not None and not _is_hex_color(color):
-        # Theme color (e.g. "tx1", "accent1") - set via XML
+    else:
+        # Theme color (e.g. "tx1") - set via XML
         _apply_theme_line_color(shape, color, width)
 
-    if color is None and width == 0:
-        try:
-            shape.line.fill.background()
-        except Exception:
-            pass
 
-    # Ensure a:ln exists for arrowhead support if not already present
-    if width <= 0 and not _is_hex_color(color):
-        _ensure_line_xml(shape)
-
-
-def _apply_theme_line_color(shape, theme_color, width):
+def _apply_theme_line_color(shape, theme_color, width, modifiers=None):
     """Apply a theme/scheme color to line via XML."""
     try:
         spPr = _get_spPr(shape)
@@ -468,6 +456,10 @@ def _apply_theme_line_color(shape, theme_color, width):
                 ln.remove(child)
         solid = ln.makeelement('{{{}}}solidFill'.format(A_NS), {})
         scheme = solid.makeelement('{{{}}}schemeClr'.format(A_NS), {'val': theme_color})
+        if modifiers:
+            for mod_name, mod_val in modifiers.items():
+                mod = scheme.makeelement('{{{}}}{}'.format(A_NS, mod_name), {'val': mod_val})
+                scheme.append(mod)
         solid.append(scheme)
         ln.append(solid)
     except Exception:
@@ -490,6 +482,18 @@ def _make_ln(spPr, width=0):
     return ln
 
 
+def _remove_shape_effect(shape):
+    """Remove default effect/shadow from shape style."""
+    try:
+        style = shape._element.find('.//{http://schemas.openxmlformats.org/presentationml/2006/main}style')
+        if style is not None:
+            effectRef = style.find('{http://schemas.openxmlformats.org/drawingml/2006/main}effectRef')
+            if effectRef is not None:
+                effectRef.set('idx', '0')
+    except Exception:
+        pass
+
+
 def _ensure_line_xml(shape):
     """Ensure a minimal a:ln element exists for arrowhead support."""
     try:
@@ -501,6 +505,32 @@ def _ensure_line_xml(shape):
             etree.SubElement(spPr, '{{{}}}ln'.format(A_NS))
     except Exception:
         pass
+
+
+def _apply_run_font_color(run, color_value):
+    """Apply font color to a run. Supports 'rgb:XXXXXX' and 'theme:XXX' formats."""
+    if not color_value:
+        return
+    if color_value.startswith("theme:"):
+        theme_val = color_value[6:]
+        try:
+            rPr = run._r.find('{{{}}}rPr'.format(A_NS))
+            if rPr is None:
+                rPr = etree.SubElement(run._r, '{{{}}}rPr'.format(A_NS))
+            # Remove existing fill
+            for child in list(rPr):
+                if 'Fill' in child.tag or 'fill' in child.tag:
+                    rPr.remove(child)
+            solid = etree.SubElement(rPr, '{{{}}}solidFill'.format(A_NS))
+            scheme = etree.SubElement(solid, '{{{}}}schemeClr'.format(A_NS))
+            scheme.set('val', theme_val)
+        except Exception:
+            pass
+    else:
+        try:
+            run.font.color.rgb = RGBColor.from_string(color_value)
+        except Exception:
+            pass
 
 
 def _apply_text(shape, text_meta):
@@ -538,7 +568,4 @@ def _apply_text(shape, text_meta):
             if run_meta.get("font_name"):
                 run.font.name = run_meta["font_name"]
             if run_meta.get("font_color"):
-                try:
-                    run.font.color.rgb = RGBColor.from_string(run_meta["font_color"])
-                except Exception:
-                    pass
+                _apply_run_font_color(run, run_meta["font_color"])

@@ -34,13 +34,31 @@ def _get_fill_info(shape):
             return {"type": "solid", "color": srgb.get("val")}
         scheme = solid.find("{{{}}}schemeClr".format(A_NS))
         if scheme is not None:
-            return {"type": "scheme", "color": scheme.get("val")}
+            info = {"type": "scheme", "color": scheme.get("val")}
+            modifiers = _get_color_modifiers(scheme)
+            if modifiers:
+                info["modifiers"] = modifiers
+            return info
 
     no_fill = spPr.find("{{{}}}noFill".format(A_NS))
     if no_fill is not None:
         return {"type": "none"}
 
     return None
+
+
+def _get_color_modifiers(scheme_elem):
+    """Extract color modifiers (lumMod, lumOff, satMod, shade, tint) from a schemeClr element."""
+    modifiers = {}
+    if scheme_elem is None:
+        return modifiers
+    for child in scheme_elem:
+        tag = child.tag
+        val = child.get("val")
+        if val is not None:
+            local = tag.split("}")[-1] if "}" in tag else tag
+            modifiers[local] = val
+    return modifiers
 
 
 def _get_line_info(shape):
@@ -147,7 +165,20 @@ def _get_text_info(shape):
                 fc = font.color
                 if fc and fc.rgb:
                     run_info["font_color"] = str(fc.rgb)
-            except: pass
+                elif fc and fc.theme_color:
+                    run_info["font_color"] = "theme:{}".format(str(fc.theme_color))
+            except:
+                # Check XML for scheme color as fallback
+                try:
+                    rPr = run._r.find("{{{}}}rPr".format(A_NS))
+                    if rPr is not None:
+                        sf = rPr.find("{{{}}}solidFill".format(A_NS))
+                        if sf is not None:
+                            sc = sf.find("{{{}}}schemeClr".format(A_NS))
+                            if sc is not None:
+                                run_info["font_color"] = "theme:{}".format(sc.get("val"))
+                except:
+                    pass
 
             para_info["runs"].append(run_info)
 
