@@ -73,6 +73,14 @@ def convert_pptx_to_markdown(input_path, output_dir=None, include_notes=False,
     if not no_frontmatter:
         md_parts.append(generate_frontmatter(prs, input_path.name))
 
+    # Store presentation-level metadata
+    import json
+    pres_meta = json.dumps({
+        "slide_width": prs.slide_width,
+        "slide_height": prs.slide_height,
+    }, ensure_ascii=False)
+    md_parts.append("\n<!-- PPTX_PRESENTATION_META_START\n{}\nPPTX_PRESENTATION_META_END -->".format(pres_meta))
+
     sections = get_sections(prs)
     section_map = {}
     for sec in sections:

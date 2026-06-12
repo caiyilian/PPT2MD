@@ -23,7 +23,7 @@ def _safe_color(color_obj):
 
 def _get_fill_info(shape):
     """Extract fill information from shape XML."""
-    spPr = shape.element.find(".//{{{}}}spPr".format(A_NS))
+    spPr = shape.element.find(".//{{{}}}spPr".format(P_NS))
     if spPr is None:
         return None
 
@@ -45,7 +45,7 @@ def _get_fill_info(shape):
 
 def _get_line_info(shape):
     """Extract line/border information from shape XML."""
-    ln = shape.element.find(".//{{{}}}spPr/{{{}}}ln".format(A_NS, A_NS))
+    ln = shape.element.find(".//{{{}}}spPr/{{{}}}ln".format(P_NS, A_NS))
     if ln is None:
         ln = shape.element.find(".//{{{}}}ln".format(A_NS))
     if ln is None:
