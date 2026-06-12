@@ -111,9 +111,18 @@ def _get_text_info(shape):
 
     paragraphs = []
     for para in shape.text_frame.paragraphs:
+        # Only extract alignment if explicitly set on the paragraph
+        algn = None
+        try:
+            A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+            pPr = para._p.find('{{{}}}pPr'.format(A_NS))
+            if pPr is not None and pPr.get('algn') is not None:
+                algn = str(para.alignment)
+        except Exception:
+            pass
         para_info = {
             "level": para.level or 0,
-            "alignment": str(para.alignment) if para.alignment else None,
+            "alignment": algn,
             "runs": [],
         }
 
