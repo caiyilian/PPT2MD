@@ -103,6 +103,10 @@ def md_to_pptx(md_path, images_dir=None, output_path=None):
 
     slide_layout = prs.slide_layouts[6]  # Blank layout
 
+    # Remove objectDefaults from theme (contains style/fontRef=lt1 that
+    # causes Office to mis-resolve schemeClr colors, same as per-shape p:style)
+    _remove_theme_object_defaults(prs)
+
     for slide_meta in slides_meta:
         slide = prs.slides.add_slide(slide_layout)
 
@@ -164,7 +168,7 @@ def _add_text_box_shape(slide, meta, x, y, w, h, rotation):
 
     shape = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, x, y, w, h)
     shape.rotation = rotation
-    _remove_shape_effect(shape)
+    _remove_shape_style(shape)
 
     # Text boxes have no fill and no line by default
     shape.fill.background()
@@ -209,7 +213,7 @@ def _add_auto_shape(slide, meta, x, y, w, h, rotation):
         shape = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, x, y, w, h)
 
     shape.rotation = rotation
-    _remove_shape_effect(shape)
+    _remove_shape_style(shape)
 
     # Apply fill
     fill_meta = meta.get("fill")
@@ -285,7 +289,7 @@ def _add_line_shape(slide, meta, x, y, w, h, rotation):
         shape = slide.shapes.add_connector(
             MSO_CONNECTOR_TYPE.STRAIGHT, x, y, x + w, y + h
         )
-        _remove_shape_effect(shape)
+        _remove_shape_style(shape)
     except Exception:
         from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
         shape = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, x, y, max(w, 1), max(h, 1))
@@ -482,14 +486,39 @@ def _make_ln(spPr, width=0):
     return ln
 
 
-def _remove_shape_effect(shape):
-    """Remove default effect/shadow from shape style."""
+def _remove_shape_style(shape):
+    """Remove the style element from a shape.
+
+    Office PowerPoint misresolves schemeClr colors (tx1, dk1, etc.)
+    as white when a <p:style> element is present. Removing it fixes
+    text color rendering while also removing default shadows.
+    """
     try:
         style = shape._element.find('.//{http://schemas.openxmlformats.org/presentationml/2006/main}style')
         if style is not None:
-            effectRef = style.find('{http://schemas.openxmlformats.org/drawingml/2006/main}effectRef')
-            if effectRef is not None:
-                effectRef.set('idx', '0')
+            shape._element.remove(style)
+    except Exception:
+        pass
+
+
+def _remove_theme_object_defaults(prs):
+    """Remove <a:objectDefaults> from the theme.
+
+    python-pptx's default theme includes <a:objectDefaults><a:spDef><a:style>
+    with fontRef idx="minor" schemeClr="lt1". This interferes with Office's
+    resolution of schemeClr colors (same mechanism as per-shape <p:style>).
+    """
+    try:
+        A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+        for part in prs.part.package.iter_parts():
+            if '/ppt/theme/' in str(part.partname):
+                theme_xml = etree.fromstring(part.blob)
+                od = theme_xml.find('{%s}objectDefaults' % A_NS)
+                if od is not None:
+                    theme_xml.remove(od)
+                    part.blob = etree.tostring(
+                        theme_xml, xml_declaration=True, encoding='UTF-8', standalone=True
+                    )
     except Exception:
         pass
 
@@ -514,14 +543,20 @@ def _apply_run_font_color(run, color_value):
     if color_value.startswith("theme:"):
         theme_val = color_value[6:]
         try:
-            rPr = run._r.find('{{{}}}rPr'.format(A_NS))
+            rPr_tag = '{{{}}}rPr'.format(A_NS)
+            rPr = run._r.find(rPr_tag)
             if rPr is None:
-                rPr = etree.SubElement(run._r, '{{{}}}rPr'.format(A_NS))
+                # Insert rPr BEFORE a:t (SubElement appends, which is invalid XML)
+                rPr = etree.Element(rPr_tag)
+                run._r.insert(0, rPr)
             # Remove existing fill
             for child in list(rPr):
                 if 'Fill' in child.tag or 'fill' in child.tag:
                     rPr.remove(child)
-            solid = etree.SubElement(rPr, '{{{}}}solidFill'.format(A_NS))
+            # Insert solidFill at position 0 (before latin/ea/sym etc.)
+            # OOXML schema requires fill elements before font elements in rPr
+            solid = etree.Element('{{{}}}solidFill'.format(A_NS))
+            rPr.insert(0, solid)
             scheme = etree.SubElement(solid, '{{{}}}schemeClr'.format(A_NS))
             scheme.set('val', theme_val)
         except Exception:
@@ -552,6 +587,26 @@ def _apply_text(shape, text_meta):
         level = para_meta.get("level", 0)
         para.level = level
 
+        alignment = para_meta.get("alignment")
+        from pptx.enum.text import PP_ALIGN
+        if alignment:
+            try:
+                align_map = {
+                    "LEFT (1)": PP_ALIGN.LEFT,
+                    "CENTER (2)": PP_ALIGN.CENTER,
+                    "RIGHT (3)": PP_ALIGN.RIGHT,
+                    "JUSTIFY (4)": PP_ALIGN.JUSTIFY,
+                }
+                para.alignment = align_map.get(alignment, PP_ALIGN.LEFT)
+            except Exception:
+                pass
+        else:
+            # Override python-pptx default (CENTER for add_shape) to LEFT
+            try:
+                para.alignment = PP_ALIGN.LEFT
+            except Exception:
+                pass
+
         for run_meta in para_meta.get("runs", []):
             text = run_meta.get("text", "")
             run = para.add_run()
@@ -569,3 +624,7 @@ def _apply_text(shape, text_meta):
                 run.font.name = run_meta["font_name"]
             if run_meta.get("font_color"):
                 _apply_run_font_color(run, run_meta["font_color"])
+            else:
+                # No explicit font color in original (relied on p:style) 
+                # - apply default dark text since p:style was removed
+                _apply_run_font_color(run, "theme:dk1")
