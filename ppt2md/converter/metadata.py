@@ -197,7 +197,7 @@ def _get_text_info(shape):
 
 
 def _get_body_props(shape):
-    """Extract bodyPr properties (wrap, autofit) from shape XML."""
+    """Extract bodyPr properties (wrap, autofit, insets) from shape XML."""
     try:
         # Try both A_NS and P_NS for txBody
         txBody = shape._element.find('.//{%s}txBody' % A_NS)
@@ -215,6 +215,12 @@ def _get_body_props(shape):
         wrap = bodyPr.get('wrap')
         if wrap is not None:
             props['wrap'] = wrap
+
+        # inset attributes (margins)
+        for attr in ('lIns', 'rIns', 'tIns', 'bIns'):
+            val = bodyPr.get(attr)
+            if val is not None:
+                props[attr] = int(val)
 
         # autofit elements
         spAutoFit = bodyPr.find('{%s}spAutoFit' % A_NS)

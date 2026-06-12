@@ -246,6 +246,11 @@ def _add_auto_shape(slide, meta, x, y, w, h, rotation):
     if text_meta:
         _apply_text(shape, text_meta)
 
+    # Apply body properties (wrap, autofit, insets)
+    body_props = meta.get("body_props")
+    if body_props:
+        _apply_body_props(shape, body_props)
+
 
 def _add_image_shape(slide, meta, images_dir, x, y, w, h):
     """Add an image shape."""
@@ -574,7 +579,7 @@ def _apply_run_font_color(run, color_value):
 
 
 def _apply_body_props(shape, body_props):
-    """Apply body properties (wrap, autofit) to a shape."""
+    """Apply body properties (wrap, autofit, insets) to a shape."""
     try:
         A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
         P_NS = 'http://schemas.openxmlformats.org/presentationml/2006/main'
@@ -592,6 +597,12 @@ def _apply_body_props(shape, body_props):
         wrap = body_props.get('wrap')
         if wrap is not None:
             bodyPr.set('wrap', wrap)
+
+        # Apply inset attributes (margins)
+        for attr in ('lIns', 'rIns', 'tIns', 'bIns'):
+            val = body_props.get(attr)
+            if val is not None:
+                bodyPr.set(attr, str(val))
 
         # Apply autofit
         autofit = body_props.get('autofit')
