@@ -1,0 +1,228 @@
+"""Extract comprehensive shape metadata for round-trip conversion."""
+
+from lxml import etree
+
+A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+
+
+def _safe_color(color_obj):
+    """Extract color value from python-pptx color object."""
+    if color_obj is None:
+        return None
+    try:
+        return {"type": "rgb", "value": str(color_obj.rgb)}
+    except AttributeError:
+        pass
+    try:
+        return {"type": "theme", "value": str(color_obj.theme_color), "shade": getattr(color_obj, '_color', None) and getattr(color_obj._color, 'shade', None)}
+    except AttributeError:
+        pass
+    return None
+
+
+def _get_fill_info(shape):
+    """Extract fill information from shape XML."""
+    spPr = shape.element.find(".//{{{}}}spPr".format(A_NS))
+    if spPr is None:
+        return None
+
+    solid = spPr.find(".//{{{}}}solidFill".format(A_NS))
+    if solid is not None:
+        srgb = solid.find("{{{}}}srgbClr".format(A_NS))
+        if srgb is not None:
+            return {"type": "solid", "color": srgb.get("val")}
+        scheme = solid.find("{{{}}}schemeClr".format(A_NS))
+        if scheme is not None:
+            return {"type": "scheme", "color": scheme.get("val")}
+
+    no_fill = spPr.find("{{{}}}noFill".format(A_NS))
+    if no_fill is not None:
+        return {"type": "none"}
+
+    return None
+
+
+def _get_line_info(shape):
+    """Extract line/border information from shape XML."""
+    ln = shape.element.find(".//{{{}}}spPr/{{{}}}ln".format(A_NS, A_NS))
+    if ln is None:
+        ln = shape.element.find(".//{{{}}}ln".format(A_NS))
+    if ln is None:
+        return None
+
+    width = ln.get("w")
+    info = {"width": int(width) if width else 0}
+
+    solid = ln.find(".//{{{}}}solidFill".format(A_NS))
+    if solid is not None:
+        srgb = solid.find("{{{}}}srgbClr".format(A_NS))
+        if srgb is not None:
+            info["color"] = srgb.get("val")
+        scheme = solid.find("{{{}}}schemeClr".format(A_NS))
+        if scheme is not None:
+            info["color"] = scheme.get("val")
+
+    no_fill = ln.find("{{{}}}noFill".format(A_NS))
+    if no_fill is not None:
+        info["color"] = None
+
+    # Line style (dash)
+    prstDash = ln.find(".//{{{}}}prstDash".format(A_NS))
+    if prstDash is not None:
+        info["dash"] = prstDash.get("val")
+
+    # Arrow heads
+    for end in ["tailEnd", "headEnd"]:
+        tag = "{{{}}}{}".format(A_NS, end)
+        arrow = ln.find(tag)
+        if arrow is not None:
+            info[end] = {
+                "type": arrow.get("type"),
+                "w": arrow.get("w"),
+                "len": arrow.get("len"),
+            }
+
+    return info
+
+
+def _get_text_info(shape):
+    """Extract detailed text information with formatting."""
+    if not shape.has_text_frame:
+        return None
+
+    paragraphs = []
+    for para in shape.text_frame.paragraphs:
+        para_info = {
+            "level": para.level or 0,
+            "alignment": str(para.alignment) if para.alignment else None,
+            "runs": [],
+        }
+
+        for run in para.runs:
+            run_info = {"text": run.text}
+            font = run.font
+            try:
+                if font.size:
+                    run_info["font_size"] = font.size
+            except: pass
+            try:
+                if font.bold:
+                    run_info["bold"] = True
+            except: pass
+            try:
+                if font.italic:
+                    run_info["italic"] = True
+            except: pass
+            try:
+                if font.underline:
+                    run_info["underline"] = True
+            except: pass
+            try:
+                if getattr(font, 'strikethrough', None):
+                    run_info["strikethrough"] = True
+            except: pass
+
+            # Superscript/subscript via baseline
+            try:
+                rPr = run._r.find("{{{}}}rPr".format(A_NS))
+                if rPr is not None:
+                    baseline = rPr.get("baseline")
+                    if baseline:
+                        val = int(baseline)
+                        if val > 0:
+                            run_info["superscript"] = True
+                        elif val < 0:
+                            run_info["subscript"] = True
+            except: pass
+
+            # Font name
+            try:
+                if font.name:
+                    run_info["font_name"] = font.name
+            except: pass
+
+            # Font color
+            try:
+                fc = font.color
+                if fc and fc.rgb:
+                    run_info["font_color"] = str(fc.rgb)
+            except: pass
+
+            para_info["runs"].append(run_info)
+
+        paragraphs.append(para_info)
+
+    return {"paragraphs": paragraphs}
+
+
+def extract_shape_metadata(shape):
+    """Extract comprehensive metadata for a shape.
+
+    Returns dict with all properties needed for round-trip conversion.
+    """
+    meta = {
+        "name": shape.name,
+        "type": str(shape.shape_type),
+        "position": {
+            "x": shape.left,
+            "y": shape.top,
+        },
+        "size": {
+            "width": shape.width,
+            "height": shape.height,
+        },
+        "rotation": shape.rotation or 0,
+    }
+
+    # Auto shape type
+    try:
+        if shape.shape_type == 1:  # MSO_SHAPE_TYPE.AUTO_SHAPE
+            meta["auto_shape_type"] = str(shape.auto_shape_type)
+    except (AttributeError, ValueError):
+        pass
+
+    # Placeholder info
+    if shape.is_placeholder:
+        meta["placeholder"] = {
+            "idx": shape.placeholder_format.idx,
+            "type": str(shape.placeholder_format.type),
+        }
+
+    # Fill
+    fill_info = _get_fill_info(shape)
+    if fill_info:
+        meta["fill"] = fill_info
+
+    # Line
+    line_info = _get_line_info(shape)
+    if line_info:
+        meta["line"] = line_info
+
+    # Text
+    text_info = _get_text_info(shape)
+    if text_info:
+        meta["text"] = text_info
+
+    # Image
+    if hasattr(shape, "image") and shape.image is not None:
+        meta["image"] = {
+            "content_type": shape.image.content_type,
+            "blob_size": len(shape.image.blob),
+        }
+
+    # Table
+    if hasattr(shape, "has_table") and shape.has_table:
+        table = shape.table
+        meta["table"] = {
+            "rows": len(table.rows),
+            "cols": len(table.columns),
+        }
+
+    # Chart
+    if hasattr(shape, "has_chart") and shape.has_chart:
+        meta["chart"] = {
+            "type": str(shape.chart.chart_type),
+        }
+
+    return meta
