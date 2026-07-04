@@ -27,7 +27,7 @@ def _get_fill_info(shape):
     if spPr is None:
         return None
 
-    solid = spPr.find(".//{{{}}}solidFill".format(A_NS))
+    solid = spPr.find("{{{}}}solidFill".format(A_NS))
     if solid is not None:
         srgb = solid.find("{{{}}}srgbClr".format(A_NS))
         if srgb is not None:
