@@ -634,23 +634,41 @@ def _add_image_shape(slide, meta, images_dir, x, y, w, h):
 def _add_line_shape(slide, meta, x, y, w, h, rotation):
     """Add a line/connector shape with arrowheads."""
     from pptx.enum.shapes import MSO_CONNECTOR_TYPE
+    from pptx.oxml.ns import qn
+    from lxml import etree
+
+    # Determine connector type from metadata
+    line_meta = meta.get("line", {})
+    connector_geom = line_meta.get("connector_geom", "")
+
+    conn_type = MSO_CONNECTOR_TYPE.STRAIGHT
+    if connector_geom == "bentConnector2":
+        conn_type = MSO_CONNECTOR_TYPE.ELBOW
 
     try:
-        shape = slide.shapes.add_connector(
-            MSO_CONNECTOR_TYPE.STRAIGHT, x, y, x + w, y + h
-        )
+        shape = slide.shapes.add_connector(conn_type, x, y, x + w, y + h)
         _remove_shape_style(shape)
     except Exception:
         from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
         shape = slide.shapes.add_shape(MSO_AUTO_SHAPE_TYPE.RECTANGLE, x, y, max(w, 1), max(h, 1))
         shape.fill.background()
 
+    # Apply flip flags on xfrm
+    try:
+        spPr = _get_spPr(shape)
+        if spPr is not None:
+            xfrm = spPr.find('{%s}xfrm' % A_NS)
+            if xfrm is not None:
+                for attr in ('flipH', 'flipV'):
+                    val = line_meta.get(attr)
+                    if val:
+                        xfrm.set(attr, val)
+    except Exception:
+        pass
+
     # Apply line properties including arrowheads
-    line_meta = meta.get("line")
     if line_meta:
         _apply_line(shape, line_meta)
-
-        # Apply arrowheads via XML
         _apply_arrowheads(shape, line_meta)
 
 
