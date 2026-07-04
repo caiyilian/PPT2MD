@@ -101,6 +101,22 @@ def _get_line_info(shape):
                 "len": arrow.get("len"),
             }
 
+    # Connector geometry preset (for LINE type shapes)
+    spPr = shape.element.find(".//{{{}}}spPr".format(P_NS))
+    if spPr is not None:
+        prstGeom = spPr.find("{{{}}}prstGeom".format(A_NS))
+        if prstGeom is not None:
+            prst = prstGeom.get("prst")
+            if prst and prst != "line":
+                info["connector_geom"] = prst
+        # Flip flags on xfrm
+        xfrm = spPr.find("{{{}}}xfrm".format(A_NS))
+        if xfrm is not None:
+            for attr in ("flipH", "flipV"):
+                val = xfrm.get(attr)
+                if val:
+                    info[attr] = val
+
     return info
 
 
