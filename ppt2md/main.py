@@ -134,6 +134,11 @@ def convert_pptx_to_markdown(input_path, output_dir=None, include_notes=False,
             if shape_md:
                 md_parts.append("\n{}".format(shape_md))
 
+        # Extract formula shapes from AlternateContent (python-pptx skips these)
+        from ppt2md.converter.metadata import extract_alternate_content_shapes
+        formula_shapes = extract_alternate_content_shapes(slide)
+        shape_metadata.extend(formula_shapes)
+
         # Embed slide metadata as JSON in HTML comment
         import json
         slide_meta = {
