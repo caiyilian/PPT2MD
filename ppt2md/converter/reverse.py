@@ -151,7 +151,8 @@ def _add_shape_from_metadata(slide, meta, images_dir):
 
     # Handle groups (MSO_SHAPE_TYPE.GROUP = 6)
     if type_val == 6 or type_name == "GROUP":
-        return  # Groups are complex, skip for now
+        _add_group_shape(slide, meta, x, y, w, h)
+        return
 
     # Handle text boxes (MSO_SHAPE_TYPE.TEXT_BOX = 17)
     if type_val == 17 or type_name == "TEXT_BOX":
@@ -160,6 +161,345 @@ def _add_shape_from_metadata(slide, meta, images_dir):
 
     # Handle auto shapes and everything else
     _add_auto_shape(slide, meta, x, y, w, h, rotation)
+
+
+def _add_group_shape(slide, meta, x, y, w, h):
+    """Add a group shape with children."""
+    try:
+        P_NS = 'http://schemas.openxmlformats.org/presentationml/2006/main'
+        A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+        from pptx.oxml.ns import qn
+
+        group_info = meta.get("group")
+        if not group_info or "children" not in group_info:
+            return
+
+        # Create group element
+        grpSp = etree.SubElement(slide.shapes._spTree, qn('p:grpSp'))
+
+        # Get a unique shape ID from the spTree
+        nvGrpSpPr = slide.shapes._spTree.find(qn('p:nvGrpSpPr'))
+        next_id = 1
+        if nvGrpSpPr is not None:
+            existing = nvGrpSpPr.findall('.//' + qn('p:cNvPr'))
+            for el in existing:
+                try:
+                    val = int(el.get('id', '0'))
+                    if val >= next_id:
+                        next_id = val + 1
+                except:
+                    pass
+
+        # nvGrpSpPr
+        nv = etree.SubElement(grpSp, qn('p:nvGrpSpPr'))
+        cnvPr = etree.SubElement(nv, qn('p:cNvPr'))
+        cnvPr.set('id', str(next_id))
+        next_id += 1
+        cnvPr.set('name', meta.get("name", "Group"))
+        etree.SubElement(nv, qn('p:cNvGrpSpPr'))
+        etree.SubElement(nv, qn('p:nvPr'))
+
+        # grpSpPr with xfrm
+        grpSpPr = etree.SubElement(grpSp, qn('p:grpSpPr'))
+        xfrm = etree.SubElement(grpSpPr, qn('a:xfrm'))
+        off = etree.SubElement(xfrm, qn('a:off'))
+        off.set('x', str(x))
+        off.set('y', str(y))
+        ext = etree.SubElement(xfrm, qn('a:ext'))
+        ext.set('cx', str(w))
+        ext.set('cy', str(h))
+
+        # Coordinate space for children
+        cs = group_info.get("coord_space", {})
+        chOff = etree.SubElement(xfrm, qn('a:chOff'))
+        chOff.set('x', str(cs.get('chOffX', 0)))
+        chOff.set('y', str(cs.get('chOffY', 0)))
+        chExt = etree.SubElement(xfrm, qn('a:chExt'))
+        chExt.set('cx', str(cs.get('chExtCX', w)))
+        chExt.set('cy', str(cs.get('chExtCY', h)))
+
+        # Add each child shape
+        for idx, child_meta in enumerate(group_info["children"]):
+            _build_group_child(grpSp, child_meta, next_id)
+            next_id += 1
+
+    except Exception:
+        pass
+
+
+def _build_group_child(grpSp, meta, idx):
+    """Build a child shape element inside a group."""
+    P_NS = 'http://schemas.openxmlformats.org/presentationml/2006/main'
+    A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+    from pptx.oxml.ns import qn
+
+    type_str = meta.get("type", "")
+    type_val = _parse_type_value(type_str)
+
+    x = meta.get("position", {}).get("x", 0)
+    y = meta.get("position", {}).get("y", 0)
+    w = meta.get("size", {}).get("width", 100000)
+    h = meta.get("size", {}).get("height", 100000)
+    rotation = meta.get("rotation", 0)
+    name = meta.get("name", "Shape %d" % idx)
+
+    if type_val == 9:  # LINE / CONNECTOR
+        el = etree.SubElement(grpSp, qn('p:cxnSp'))
+        nv = etree.SubElement(el, qn('p:nvCxnSpPr'))
+        cnvPr = etree.SubElement(nv, qn('p:cNvPr'))
+        cnvPr.set('id', str(idx))
+        cnvPr.set('name', name)
+        etree.SubElement(nv, qn('p:cNvCxnSpPr'))
+        etree.SubElement(nv, qn('p:nvPr'))
+    else:
+        el = etree.SubElement(grpSp, qn('p:sp'))
+        nv = etree.SubElement(el, qn('p:nvSpPr'))
+        cnvPr = etree.SubElement(nv, qn('p:cNvPr'))
+        cnvPr.set('id', str(idx))
+        cnvPr.set('name', name)
+        etree.SubElement(nv, qn('p:cNvSpPr'))
+        etree.SubElement(nv, qn('p:nvPr'))
+
+    # spPr
+    spPr = etree.SubElement(el, qn('p:spPr'))
+    xfrm = etree.SubElement(spPr, qn('a:xfrm'))
+    if rotation:
+        xfrm.set('rot', str(int(rotation * 60000)))
+    off = etree.SubElement(xfrm, qn('a:off'))
+    off.set('x', str(x))
+    off.set('y', str(y))
+    ext = etree.SubElement(xfrm, qn('a:ext'))
+    ext.set('cx', str(w))
+    ext.set('cy', str(h))
+
+    if type_val != 9:  # Not a connector - add geometry
+        auto_type_str = meta.get("auto_shape_type", "")
+        prst = 'rect'
+        if auto_type_str:
+            parsed = re.match(r'.*?\((\d+)\)', auto_type_str)
+            if parsed:
+                auto_val = int(parsed.group(1))
+                prst_map = {1: 'rect', 5: 'roundRect', 9: 'ellipse', 33: 'rightArrow', 34: 'leftArrow'}
+                prst = prst_map.get(auto_val, 'rect')
+        geom = etree.SubElement(spPr, qn('a:prstGeom'))
+        geom.set('prst', prst)
+        etree.SubElement(geom, qn('a:avLst'))
+    else:
+        # Connector: add line geometry
+        geom = etree.SubElement(spPr, qn('a:prstGeom'))
+        geom.set('prst', 'line')
+        etree.SubElement(geom, qn('a:avLst'))
+
+    # Fill (skip for connectors - connectors use line fill only)
+    fill_meta = meta.get("fill")
+    if fill_meta and type_val != 9:
+        _apply_fill_xml(spPr, fill_meta)
+
+    # Line
+    line_meta = meta.get("line")
+    if line_meta:
+        _apply_line_xml(spPr, line_meta)
+
+    # Text
+    text_meta = meta.get("text")
+    if text_meta:
+        _add_body_props_xml(el, text_meta)
+        _apply_text_xml(el, text_meta)
+
+    # Body props
+    body_props = meta.get("body_props")
+    if body_props:
+        _apply_body_props_xml(el, body_props)
+
+
+def _apply_fill_xml(spPr, fill_meta):
+    """Apply fill to an spPr XML element (used for group children)."""
+    A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+    from pptx.oxml.ns import qn
+
+    fill_type = fill_meta.get("type")
+    if fill_type == "none":
+        etree.SubElement(spPr, qn('a:noFill'))
+        return
+
+    if fill_type == "scheme":
+        color = fill_meta.get("color", "bg1")
+        modifiers = fill_meta.get("modifiers")
+        solid = etree.SubElement(spPr, qn('a:solidFill'))
+        sc = etree.SubElement(solid, qn('a:schemeClr'))
+        sc.set('val', color)
+        if modifiers:
+            for k, v in modifiers.items():
+                mod = etree.SubElement(sc, '{%s}%s' % (A_NS, k))
+                mod.set('val', v)
+        return
+
+    if fill_type == "rgb":
+        color = fill_meta.get("color", "000000")
+        solid = etree.SubElement(spPr, qn('a:solidFill'))
+        sc = etree.SubElement(solid, qn('a:srgbClr'))
+        sc.set('val', color.upper())
+        return
+
+    if fill_type in ("blip", "picture"):
+        # Skip image fills for group children (complex)
+        pass
+
+
+def _apply_line_xml(spPr, line_meta):
+    """Apply line to an spPr XML element (used for group children)."""
+    A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+    from pptx.oxml.ns import qn
+
+    width = line_meta.get("width", 0)
+    color = line_meta.get("color")
+
+    if color is None and width == 0:
+        return
+
+    ln = etree.SubElement(spPr, qn('a:ln'))
+    if width > 0:
+        ln.set('w', str(width))
+
+    if color is None:
+        return
+
+    solid = etree.SubElement(ln, qn('a:solidFill'))
+    if _is_hex_color(color):
+        sc = etree.SubElement(solid, qn('a:srgbClr'))
+        sc.set('val', color.upper())
+    else:
+        sc = etree.SubElement(solid, qn('a:schemeClr'))
+        sc.set('val', color)
+
+
+def _add_body_props_xml(el, text_meta):
+    """Add txBody with bodyPr to a shape element."""
+    A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+    from pptx.oxml.ns import qn
+
+    txBody = etree.SubElement(el, qn('p:txBody'))
+    bodyPr = etree.SubElement(txBody, qn('a:bodyPr'))
+    bodyPr.set('rtlCol', '0')
+    bodyPr.set('anchor', 'ctr')
+    etree.SubElement(txBody, qn('a:lstStyle'))
+
+
+def _apply_text_xml(el, text_meta):
+    """Apply text to a group child element."""
+    A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+    from pptx.oxml.ns import qn
+
+    paragraphs = text_meta.get("paragraphs", [])
+    if not paragraphs:
+        return
+
+    # Find or create txBody
+    txBody = el.find(qn('p:txBody'))
+    if txBody is None:
+        txBody = etree.SubElement(el, qn('p:txBody'))
+        bodyPr = etree.SubElement(txBody, qn('a:bodyPr'))
+        bodyPr.set('rtlCol', '0')
+        etree.SubElement(txBody, qn('a:lstStyle'))
+
+    bodyPr = txBody.find(qn('a:bodyPr'))
+    if bodyPr is not None and bodyPr.get('anchor') is None:
+        bodyPr.set('anchor', 'ctr')
+
+    for para_meta in paragraphs:
+        p = etree.SubElement(txBody, qn('a:p'))
+        level = para_meta.get("level", 0)
+        if level:
+            pPr = etree.SubElement(p, qn('a:pPr'))
+            pPr.set('lvl', str(level))
+
+        for run_meta in para_meta.get("runs", []):
+            r = etree.SubElement(p, qn('a:r'))
+            text = run_meta.get("text", "")
+
+            # Build rPr
+            rPr = etree.SubElement(r, qn('a:rPr'))
+            font_size = run_meta.get("font_size")
+            if font_size:
+                rPr.set('sz', str(int(font_size * 100 / 12700)))
+            if run_meta.get("bold"):
+                rPr.set('b', '1')
+            if run_meta.get("italic"):
+                rPr.set('i', '1')
+            if run_meta.get("underline"):
+                rPr.set('u', '1')
+
+            font_name = run_meta.get("font_name")
+            if font_name:
+                latin = etree.SubElement(rPr, qn('a:latin'))
+                latin.set('typeface', font_name)
+
+            font_color = run_meta.get("font_color")
+            if font_color:
+                if font_color.startswith("theme:"):
+                    solid = etree.SubElement(rPr, qn('a:solidFill'))
+                    sc = etree.SubElement(solid, qn('a:schemeClr'))
+                    sc.set('val', font_color[6:])
+                elif _is_hex_color(font_color):
+                    solid = etree.SubElement(rPr, qn('a:solidFill'))
+                    sc = etree.SubElement(solid, qn('a:srgbClr'))
+                    sc.set('val', font_color.upper())
+            else:
+                # Default to dk1
+                solid = etree.SubElement(rPr, qn('a:solidFill'))
+                sc = etree.SubElement(solid, qn('a:schemeClr'))
+                sc.set('val', 'dk1')
+
+            t = etree.SubElement(r, qn('a:t'))
+            t.text = text
+
+
+def _apply_body_props_xml(el, body_props):
+    """Apply body properties (wrap, autofit, insets) to a group child."""
+    A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+    from pptx.oxml.ns import qn
+
+    txBody = el.find(qn('p:txBody'))
+    if txBody is None:
+        return
+    bodyPr = txBody.find(qn('a:bodyPr'))
+    if bodyPr is None:
+        return
+
+    wrap = body_props.get('wrap')
+    if wrap is not None:
+        bodyPr.set('wrap', wrap)
+
+    for attr in ('lIns', 'rIns', 'tIns', 'bIns'):
+        val = body_props.get(attr)
+        if val is not None:
+            bodyPr.set(attr, str(val))
+
+    autofit = body_props.get('autofit')
+    if autofit == 'spAutoFit':
+        for child in list(bodyPr):
+            if 'Autofit' in child.tag:
+                bodyPr.remove(child)
+        etree.SubElement(bodyPr, qn('a:spAutoFit'))
+    elif autofit == 'normAutofit':
+        for child in list(bodyPr):
+            if 'Autofit' in child.tag:
+                bodyPr.remove(child)
+        norm = etree.SubElement(bodyPr, qn('a:normAutofit'))
+        fs = body_props.get('fontScale')
+        if fs: norm.set('fontScale', str(fs))
+        ls = body_props.get('lnSpcReduction')
+        if ls: norm.set('lnSpcReduction', str(ls))
+
+
+def _parse_type_value(type_str):
+    """Extract integer value from type string like 'AUTO_SHAPE (1)'."""
+    if not type_str:
+        return None
+    parsed = re.match(r'.*?\((\d+)\)', type_str)
+    if parsed:
+        return int(parsed.group(1))
+    return None
 
 
 def _add_text_box_shape(slide, meta, x, y, w, h, rotation):
