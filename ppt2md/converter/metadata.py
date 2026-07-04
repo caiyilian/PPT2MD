@@ -246,6 +246,39 @@ def _get_body_props(shape):
         return None
 
 
+def _get_group_info(shape):
+    """Extract group shape info including children and coordinate space."""
+    try:
+        # Get group coordinate space (chOff/chExt)
+        grpSpPr = shape._element.find('{%s}grpSpPr' % P_NS)
+        coord_space = {}
+        if grpSpPr is not None:
+            xfrm = grpSpPr.find('{%s}xfrm' % A_NS)
+            if xfrm is not None:
+                chOff = xfrm.find('{%s}chOff' % A_NS)
+                chExt = xfrm.find('{%s}chExt' % A_NS)
+                if chOff is not None:
+                    coord_space['chOffX'] = int(chOff.get('x'))
+                    coord_space['chOffY'] = int(chOff.get('y'))
+                if chExt is not None:
+                    coord_space['chExtCX'] = int(chExt.get('cx'))
+                    coord_space['chExtCY'] = int(chExt.get('cy'))
+
+        # Extract children metadata
+        children = []
+        if hasattr(shape, 'shapes'):
+            for child in shape.shapes:
+                child_meta = extract_shape_metadata(child)
+                children.append(child_meta)
+
+        result = {"children": children}
+        if coord_space:
+            result["coord_space"] = coord_space
+        return result
+    except Exception:
+        return None
+
+
 def extract_shape_metadata(shape):
     """Extract comprehensive metadata for a shape.
 
@@ -264,6 +297,11 @@ def extract_shape_metadata(shape):
         },
         "rotation": shape.rotation or 0,
     }
+
+    # Handle GROUP shapes (MSO_SHAPE_TYPE.GROUP = 6)
+    if shape.shape_type == 6:
+        meta["group"] = _get_group_info(shape)
+        return meta
 
     # Auto shape type
     try:
