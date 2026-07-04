@@ -359,3 +359,177 @@ def extract_shape_metadata(shape):
         }
 
     return meta
+
+
+def extract_alternate_content_shapes(slide):
+    """Extract shapes from inside mc:AlternateContent elements.
+
+    python-pptx does not process shapes inside AlternateContent wrappers
+    (used for OMML formulas and other forward-compatible features).
+    This function finds those shapes and extracts their metadata.
+
+    Args:
+        slide: python-pptx Slide object.
+
+    Returns:
+        list of shape metadata dicts for shapes inside AlternateContent.
+    """
+    from lxml import etree
+    from ppt2md.parser.formula import find_omml_elements, convert_omml_to_latex
+
+    P_NS = 'http://schemas.openxmlformats.org/presentationml/2006/main'
+    MC_NS = 'http://schemas.openxmlformats.org/markup-compatibility/2006'
+    A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+
+    shapes_meta = []
+    try:
+        spTree = slide._element.find('.//{%s}spTree' % P_NS)
+        if spTree is None:
+            return shapes_meta
+
+        # Process direct children that are AlternateContent
+        for child in list(spTree):
+            local = child.tag.split('}')[1] if '}' in child.tag else ''
+            if local != 'AlternateContent':
+                continue
+
+            # Find the Choice branch (has the actual shape with OMML)
+            choice = child.find('{%s}Choice' % MC_NS)
+            if choice is None:
+                continue
+
+            # Find the sp element inside Choice
+            sp = choice.find('{%s}sp' % P_NS)
+            if sp is None:
+                continue
+
+            # Get shape name
+            name_el = sp.find('.//{%s}cNvPr' % P_NS)
+            shape_name = name_el.get('name', 'Formula') if name_el is not None else 'Formula'
+
+            # Get position from spPr/xfrm
+            spPr = sp.find('{%s}spPr' % P_NS)
+            if spPr is None:
+                continue
+            xfrm = spPr.find('{%s}xfrm' % A_NS)
+            if xfrm is None:
+                continue
+            off = xfrm.find('{%s}off' % A_NS)
+            ext = xfrm.find('{%s}ext' % A_NS)
+            if off is None or ext is None:
+                continue
+
+            x = int(off.get('x', 0))
+            y = int(off.get('y', 0))
+            w = int(ext.get('cx', 100000))
+            h = int(ext.get('cy', 100000))
+
+            # Extract OMML and convert to LaTeX
+            latex_parts = []
+            omml_list = find_omml_elements(sp)
+            for omml in omml_list:
+                latex = convert_omml_to_latex(omml)
+                if latex:
+                    latex_parts.append(latex)
+
+            formula_text = ' '.join(latex_parts) if latex_parts else ''
+
+            # Also extract any regular text from the shape
+            txBody = sp.find('{%s}txBody' % P_NS)
+            text_parts = []
+            if txBody is not None:
+                for t_el in txBody.iter('{%s}t' % A_NS):
+                    if t_el.text:
+                        text_parts.append(t_el.text)
+
+            meta = {
+                "name": shape_name,
+                "type": "AUTO_SHAPE (1)",
+                "position": {"x": x, "y": y},
+                "size": {"width": w, "height": h},
+                "rotation": 0,
+                "auto_shape_type": "RECTANGLE (1)",
+                "fill": {"type": "none"},
+                "text": {"paragraphs": []},
+                "_is_formula": True,
+            }
+
+            # Build text content: combine regular text with formula
+            para_info = {"level": 0, "alignment": None, "runs": []}
+
+            if text_parts:
+                run_info = {"text": ''.join(text_parts)}
+                para_info["runs"].append(run_info)
+
+            if formula_text:
+                # Placeholder text that indicates a formula
+                formula_display = "$%s$" % formula_text
+                run_info_f = {"text": formula_display}
+                para_info["runs"].append(run_info_f)
+
+            if para_info["runs"]:
+                meta["text"]["paragraphs"].append(para_info)
+
+            shapes_meta.append(meta)
+
+    except Exception:
+        pass
+
+    return shapes_meta
+
+    # Auto shape type
+    try:
+        if shape.shape_type == 1:  # MSO_SHAPE_TYPE.AUTO_SHAPE
+            meta["auto_shape_type"] = str(shape.auto_shape_type)
+    except (AttributeError, ValueError):
+        pass
+
+    # Placeholder info
+    if shape.is_placeholder:
+        meta["placeholder"] = {
+            "idx": shape.placeholder_format.idx,
+            "type": str(shape.placeholder_format.type),
+        }
+
+    # Fill
+    fill_info = _get_fill_info(shape)
+    if fill_info:
+        meta["fill"] = fill_info
+
+    # Line
+    line_info = _get_line_info(shape)
+    if line_info:
+        meta["line"] = line_info
+
+    # Body properties (wrap, autofit)
+    body_props = _get_body_props(shape)
+    if body_props:
+        meta["body_props"] = body_props
+
+    # Text
+    text_info = _get_text_info(shape)
+    if text_info:
+        meta["text"] = text_info
+
+    # Image
+    if hasattr(shape, "image") and shape.image is not None:
+        meta["image"] = {
+            "content_type": shape.image.content_type,
+            "blob_size": len(shape.image.blob),
+        }
+
+    # Table
+    if hasattr(shape, "has_table") and shape.has_table:
+        table = shape.table
+        meta["table"] = {
+            "rows": len(table.rows),
+            "cols": len(table.columns),
+        }
+
+    # Chart
+    if hasattr(shape, "has_chart") and shape.has_chart:
+        meta["chart"] = {
+            "type": str(shape.chart.chart_type),
+        }
+
+    return meta
