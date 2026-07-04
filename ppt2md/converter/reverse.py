@@ -1046,7 +1046,4 @@ def _apply_text(shape, text_meta):
                 run.font.name = run_meta["font_name"]
             if run_meta.get("font_color"):
                 _apply_run_font_color(run, run_meta["font_color"])
-            else:
-                # No explicit font color in original (relied on p:style) 
-                # - apply default dark text since p:style was removed
-                _apply_run_font_color(run, "theme:dk1")
+            # No explicit font_color: let theme inheritance handle it
