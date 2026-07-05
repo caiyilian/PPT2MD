@@ -21,8 +21,15 @@ def _safe_color(color_obj):
     return None
 
 
-def _get_fill_info(shape):
-    """Extract fill information from shape XML."""
+def _get_fill_info(shape, theme_color_map=None):
+    """Extract fill information from shape XML.
+
+    Args:
+        shape: python-pptx Shape object.
+        theme_color_map: Optional dict mapping scheme names to hex colors,
+                        e.g. {'accent1': '5B9BD5', 'dk1': '000000'}.
+                        When provided, scheme fills are resolved to absolute hex.
+    """
     spPr = shape.element.find(".//{{{}}}spPr".format(P_NS))
     if spPr is None:
         return None
@@ -34,10 +41,18 @@ def _get_fill_info(shape):
             return {"type": "solid", "color": srgb.get("val")}
         scheme = solid.find("{{{}}}schemeClr".format(A_NS))
         if scheme is not None:
-            info = {"type": "scheme", "color": scheme.get("val")}
+            scheme_name = scheme.get("val")
+            info = {"type": "scheme", "color": scheme_name}
             modifiers = _get_color_modifiers(scheme)
             if modifiers:
                 info["modifiers"] = modifiers
+            # Resolve scheme to absolute hex if theme color map is available
+            if theme_color_map and scheme_name in theme_color_map:
+                resolved = _resolve_scheme_color(
+                    theme_color_map[scheme_name], modifiers
+                )
+                if resolved:
+                    info["_resolved"] = resolved
             return info
 
     no_fill = spPr.find("{{{}}}noFill".format(A_NS))
@@ -59,6 +74,76 @@ def _get_color_modifiers(scheme_elem):
             local = tag.split("}")[-1] if "}" in tag else tag
             modifiers[local] = val
     return modifiers
+
+
+def _resolve_scheme_color(hex_color, modifiers):
+    """Resolve a theme color with modifiers to an absolute hex color.
+
+    Supports lumMod, lumOff modifiers. Returns hex string without '#'.
+    """
+    if not hex_color or not modifiers:
+        return hex_color
+    try:
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+
+        # Convert to HSL
+        import math
+        r_norm = r / 255.0
+        g_norm = g / 255.0
+        b_norm = b / 255.0
+
+        max_c = max(r_norm, g_norm, b_norm)
+        min_c = min(r_norm, g_norm, b_norm)
+        l = (max_c + min_c) / 2.0
+
+        if max_c == min_c:
+            s = 0.0
+            h = 0.0
+        else:
+            d = max_c - min_c
+            s = d / (2.0 - max_c - min_c) if l > 0.5 else d / (max_c + min_c)
+            if max_c == r_norm:
+                h = ((g_norm - b_norm) / d + (6.0 if g_norm < b_norm else 0.0)) / 6.0
+            elif max_c == g_norm:
+                h = ((b_norm - r_norm) / d + 2.0) / 6.0
+            else:
+                h = ((r_norm - g_norm) / d + 4.0) / 6.0
+
+        if 'lumMod' in modifiers:
+            l *= int(modifiers['lumMod']) / 100000.0
+        if 'lumOff' in modifiers:
+            l += int(modifiers['lumOff']) / 100000.0
+
+        l = max(0.0, min(1.0, l))
+
+        def hsl_to_rgb(h, s, l):
+            if s == 0.0:
+                return (int(l * 255), int(l * 255), int(l * 255))
+            if l < 0.5:
+                q = l * (1.0 + s)
+            else:
+                q = l + s - l * s
+            p = 2.0 * l - q
+
+            def hue_to_rgb(t):
+                if t < 0: t += 1.0
+                if t > 1: t -= 1.0
+                if t < 1.0/6.0: return p + (q - p) * 6.0 * t
+                if t < 1.0/2.0: return q
+                if t < 2.0/3.0: return p + (q - p) * (2.0/3.0 - t) * 6.0
+                return p
+
+            r2 = int(hue_to_rgb(h + 1.0/3.0) * 255)
+            g2 = int(hue_to_rgb(h) * 255)
+            b2 = int(hue_to_rgb(h - 1.0/3.0) * 255)
+            return (r2, g2, b2)
+
+        r2, g2, b2 = hsl_to_rgb(h, s, l)
+        return "%02X%02X%02X" % (r2, g2, b2)
+    except Exception:
+        return hex_color
 
 
 def _get_line_info(shape):
@@ -295,8 +380,12 @@ def _get_group_info(shape):
         return None
 
 
-def extract_shape_metadata(shape):
+def extract_shape_metadata(shape, theme_color_map=None):
     """Extract comprehensive metadata for a shape.
+
+    Args:
+        shape: python-pptx Shape object.
+        theme_color_map: Optional dict mapping scheme names to hex colors.
 
     Returns dict with all properties needed for round-trip conversion.
     """
@@ -334,7 +423,7 @@ def extract_shape_metadata(shape):
         }
 
     # Fill
-    fill_info = _get_fill_info(shape)
+    fill_info = _get_fill_info(shape, theme_color_map)
     if fill_info:
         meta["fill"] = fill_info
 
@@ -539,7 +628,7 @@ def extract_alternate_content_shapes(slide):
         }
 
     # Fill
-    fill_info = _get_fill_info(shape)
+    fill_info = _get_fill_info(shape, theme_color_map)
     if fill_info:
         meta["fill"] = fill_info
 

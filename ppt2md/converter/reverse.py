@@ -115,6 +115,26 @@ def md_to_pptx(md_path, images_dir=None, output_path=None):
             _add_shape_from_metadata(slide, shape_meta, images_dir)
 
     prs.save(str(output_path))
+
+    # Post-save: replace theme XML directly in ZIP to avoid python-pptx caching issues
+    for slide_meta in slides_meta:
+        theme_xml_str = slide_meta.get("_theme_xml", "")
+        if theme_xml_str:
+            try:
+                import zipfile, io
+                with zipfile.ZipFile(str(output_path), 'r') as zin:
+                    data = {item.filename: zin.read(item.filename) for item in zin.infolist()}
+                for key in list(data.keys()):
+                    if 'ppt/theme/' in key:
+                        data[key] = theme_xml_str.encode('utf-8')
+                with zipfile.ZipFile(str(output_path), 'w', zipfile.ZIP_DEFLATED) as zout:
+                    for name, content in data.items():
+                        zout.writestr(name, content)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+        break
+
     return output_path
 
 
@@ -461,6 +481,13 @@ def _apply_fill_xml(spPr, fill_meta):
         return
 
     if fill_type == "scheme":
+        # Use resolved absolute color if available
+        resolved = fill_meta.get("_resolved")
+        if resolved and _is_hex_color(resolved):
+            solid = etree.SubElement(spPr, qn('a:solidFill'))
+            sc = etree.SubElement(solid, qn('a:srgbClr'))
+            sc.set('val', resolved)
+            return
         color = fill_meta.get("color", "bg1")
         modifiers = fill_meta.get("modifiers")
         solid = etree.SubElement(spPr, qn('a:solidFill'))
@@ -878,6 +905,15 @@ def _apply_fill(shape, fill_meta):
         return
 
     if fill_type == "scheme":
+        # Use resolved absolute color if available (avoids theme dependency issues)
+        resolved = fill_meta.get("_resolved")
+        if resolved and _is_hex_color(resolved):
+            try:
+                shape.fill.solid()
+                shape.fill.fore_color.rgb = RGBColor.from_string(resolved)
+                return
+            except Exception:
+                pass
         _apply_scheme_fill(shape, color, fill_meta.get("modifiers"))
         return
 
