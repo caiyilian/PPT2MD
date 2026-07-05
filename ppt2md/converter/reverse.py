@@ -154,6 +154,11 @@ def _add_shape_from_metadata(slide, meta, images_dir):
         _add_group_shape(slide, meta, x, y, w, h)
         return
 
+    # Handle formula shapes (AlternateContent with OMML)
+    if meta.get("_is_formula"):
+        _add_formula_shape(slide, meta, x, y, w, h, rotation)
+        return
+
     # Handle text boxes (MSO_SHAPE_TYPE.TEXT_BOX = 17)
     if type_val == 17 or type_name == "TEXT_BOX":
         _add_text_box_shape(slide, meta, x, y, w, h, rotation)
@@ -225,6 +230,115 @@ def _add_group_shape(slide, meta, x, y, w, h):
 
     except Exception:
         pass
+
+
+def _add_formula_shape(slide, meta, x, y, w, h, rotation):
+    """Add a formula shape wrapped in AlternateContent with OMML XML."""
+    from pptx.oxml.ns import qn
+    from lxml import etree
+    import re
+
+    P_NS = 'http://schemas.openxmlformats.org/presentationml/2006/main'
+    A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
+    MC_NS = 'http://schemas.openxmlformats.org/markup-compatibility/2006'
+    A14_NS = 'http://schemas.microsoft.com/office/drawing/2010/main'
+    R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+
+    omml_xml_list = meta.get("_omml_xml", [])
+    fallback_xml = meta.get("_fallback_xml")
+
+    if not omml_xml_list:
+        # Fallback: create regular text box with LaTeX text
+        _add_text_box_shape(slide, meta, x, y, w, h, rotation)
+        return
+
+    try:
+        from pptx.oxml import parse_xml
+
+        # Get a unique shape ID
+        nv_container = slide.shapes._spTree.find(qn('p:nvGrpSpPr'))
+        sp_id = 1
+        if nv_container is not None:
+            for el in nv_container.iter():
+                if el.tag.endswith('}cNvPr'):
+                    try:
+                        val = int(el.get('id', '0'))
+                        if val >= sp_id:
+                            sp_id = val + 1
+                    except:
+                        pass
+
+        # Build the AlternateContent structure as XML string
+        # Use parse_xml to avoid lxml namespace registration conflicts
+
+        # Choice sp XML (without OMML, which we inject separately)
+        choice_sp_xml = """<p:sp xmlns:p="%s" xmlns:a="%s" xmlns:r="%s">
+  <p:nvSpPr>
+    <p:cNvPr id="%d" name="%s"/>
+    <p:cNvSpPr/>
+    <p:nvPr/>
+  </p:nvSpPr>
+  <p:spPr>
+    <a:xfrm><a:off x="%d" y="%d"/><a:ext cx="%d" cy="%d"/></a:xfrm>
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+  </p:spPr>
+  <p:txBody>
+    <a:bodyPr wrap="none" rtlCol="0"><a:spAutoFit/></a:bodyPr>
+    <a:lstStyle/>
+    <a:p><a:pPr/>
+    </a:p>
+  </p:txBody>
+</p:sp>""" % (P_NS, A_NS, R_NS, sp_id, meta.get('name', 'Formula'), x, y, w, h)
+        sp_id += 1
+
+        choice_sp = etree.fromstring(choice_sp_xml.encode())
+
+        # Inject OMML XML into the a:p element
+        p_el = choice_sp.find('.//{%s}p' % A_NS)
+        for omml_xml in omml_xml_list:
+            omml_el = etree.fromstring(omml_xml.encode())
+            if p_el is not None:
+                p_el.append(omml_el)
+
+        # Fallback XML
+        fb_xml = """<p:sp xmlns:p="%s" xmlns:a="%s">
+  <p:nvSpPr>
+    <p:cNvPr id="%d" name="%s"/>
+    <p:cNvSpPr/>
+    <p:nvPr/>
+  </p:nvSpPr>
+  <p:spPr>
+    <a:xfrm><a:off x="%d" y="%d"/><a:ext cx="%d" cy="%d"/></a:xfrm>
+    <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+  </p:spPr>
+  <p:txBody>
+    <a:bodyPr/>
+    <a:lstStyle/>
+    <a:p><a:r><a:rPr/><a:t> </a:t></a:r></a:p>
+  </p:txBody>
+</p:sp>""" % (P_NS, A_NS, sp_id, meta.get('name', 'Formula') + '_fb', x, y, w, h)
+        sp_id += 1
+
+        # Full AlternateContent XML
+        mc_xml = """<mc:AlternateContent xmlns:mc="%s" xmlns:a14="%s"
+  xmlns:a="%s" xmlns:p="%s" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"
+  xmlns:r="%s">
+  <mc:Choice Requires="a14">
+    %s
+  </mc:Choice>
+  <mc:Fallback>
+    %s
+  </mc:Fallback>
+</mc:AlternateContent>""" % (MC_NS, A14_NS, A_NS, P_NS, R_NS,
+                               etree.tostring(choice_sp).decode(),
+                               fb_xml)
+
+        ac_element = parse_xml(mc_xml.encode())
+        slide.shapes._spTree.append(ac_element)
+
+    except Exception:
+        # Fallback to text box
+        _add_text_box_shape(slide, meta, x, y, w, h, rotation)
 
 
 def _build_group_child(grpSp, meta, idx):

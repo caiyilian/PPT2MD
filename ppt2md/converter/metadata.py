@@ -377,6 +377,28 @@ def extract_shape_metadata(shape):
     return meta
 
 
+def _get_fallback_xml(sp):
+    """Get the Fallback sp XML from the AlternateContent parent."""
+    from lxml import etree
+    MC_NS = 'http://schemas.openxmlformats.org/markup-compatibility/2006'
+    P_NS = 'http://schemas.openxmlformats.org/presentationml/2006/main'
+    try:
+        parent = sp.getparent()
+        while parent is not None:
+            local = parent.tag.split('}')[1] if '}' in parent.tag else ''
+            if local == 'AlternateContent':
+                fallback = parent.find('{%s}Fallback' % MC_NS)
+                if fallback is not None:
+                    fb_sp = fallback.find('{%s}sp' % P_NS)
+                    if fb_sp is not None:
+                        return etree.tostring(fb_sp).decode()
+                break
+            parent = parent.getparent()
+    except Exception:
+        pass
+    return None
+
+
 def extract_alternate_content_shapes(slide):
     """Extract shapes from inside mc:AlternateContent elements.
 
@@ -440,6 +462,14 @@ def extract_alternate_content_shapes(slide):
             w = int(ext.get('cx', 100000))
             h = int(ext.get('cy', 100000))
 
+            # Extract OMML XML for direct injection during reverse
+            A14_NS = 'http://schemas.microsoft.com/office/drawing/2010/main'
+            txBody = sp.find('{%s}txBody' % P_NS)
+            omml_xml_parts = []
+            if txBody is not None:
+                for a14_m in txBody.iter('{%s}m' % A14_NS):
+                    omml_xml_parts.append(etree.tostring(a14_m).decode())
+
             # Extract OMML and convert to LaTeX
             latex_parts = []
             omml_list = find_omml_elements(sp)
@@ -451,7 +481,6 @@ def extract_alternate_content_shapes(slide):
             formula_text = ' '.join(latex_parts) if latex_parts else ''
 
             # Also extract any regular text from the shape
-            txBody = sp.find('{%s}txBody' % P_NS)
             text_parts = []
             if txBody is not None:
                 for t_el in txBody.iter('{%s}t' % A_NS):
@@ -468,6 +497,8 @@ def extract_alternate_content_shapes(slide):
                 "fill": {"type": "none"},
                 "text": {"paragraphs": []},
                 "_is_formula": True,
+                "_omml_xml": omml_xml_parts,
+                "_fallback_xml": _get_fallback_xml(sp),
             }
 
             # Build text content: combine regular text with formula
