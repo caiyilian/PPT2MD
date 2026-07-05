@@ -111,6 +111,26 @@ def convert_pptx_to_markdown(input_path, output_dir=None, include_notes=False,
 
         sorted_shapes = sort_shapes_by_position(list(slide.shapes))
 
+        # Build theme color map for resolving scheme colors to absolute values
+        theme_color_map = None
+        try:
+            from lxml import etree
+            for part in prs.part.package.iter_parts():
+                if '/ppt/theme/' in str(part.partname):
+                    theme = etree.fromstring(part.blob)
+                    ns = {'a': 'http://schemas.openxmlformats.org/drawingml/2006/main'}
+                    clr = theme.find('.//a:clrScheme', ns)
+                    if clr is not None:
+                        theme_color_map = {}
+                        for child in clr:
+                            tag = child.tag.split('}')[1] if '}' in child.tag else child.tag
+                            for c in child:
+                                val = c.get('val') or c.get('lastClr')
+                                if val:
+                                    theme_color_map[tag] = val
+        except Exception:
+            pass
+
         # Extract all images once to get filename mapping before metadata
         from ppt2md.parser.image import extract_images_from_slide as extract_imgs
         all_images = extract_imgs(slide, str(images_dir), slide_num, seen_rids)
@@ -120,7 +140,7 @@ def convert_pptx_to_markdown(input_path, output_dir=None, include_notes=False,
 
         shape_metadata = []
         for shape in sorted_shapes:
-            meta = extract_shape_metadata(shape)
+            meta = extract_shape_metadata(shape, theme_color_map)
             # Inject image filename into metadata for correct roundtrip
             if hasattr(shape, "image") and shape.image is not None:
                 idx = list(slide.shapes).index(shape)
@@ -145,6 +165,17 @@ def convert_pptx_to_markdown(input_path, output_dir=None, include_notes=False,
             "slide_num": slide_num,
             "shapes": shape_metadata,
         }
+
+        # Store theme color scheme for roundtrip fidelity
+        if slide_num == 1:
+            try:
+                for part in prs.part.package.iter_parts():
+                    if '/ppt/theme/' in str(part.partname):
+                        theme_xml = part.blob.decode('utf-8')
+                        slide_meta["_theme_xml"] = theme_xml
+                        break
+            except Exception:
+                pass
         meta_json = json.dumps(slide_meta, ensure_ascii=False, indent=2)
         md_parts.append("\n<!-- PPTX_META_START\n{}\nPPTX_META_END -->".format(meta_json))
 
