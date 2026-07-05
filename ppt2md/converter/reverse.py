@@ -311,6 +311,10 @@ def _add_formula_shape(slide, meta, x, y, w, h, rotation):
                     rPr.set('sz', str(int(run_meta['font_size'] * 100 / 12700)))
                 if run_meta.get('bold'):
                     rPr.set('b', '1')
+                if run_meta.get('superscript'):
+                    rPr.set('baseline', '30000')
+                if run_meta.get('subscript'):
+                    rPr.set('baseline', '-25000')
                 t = etree.SubElement(r, qn('a:t'))
                 t.text = text
 
@@ -413,7 +417,7 @@ def _build_group_child(grpSp, meta, idx):
             parsed = re.match(r'.*?\((\d+)\)', auto_type_str)
             if parsed:
                 auto_val = int(parsed.group(1))
-                prst_map = {1: 'rect', 5: 'roundRect', 9: 'ellipse', 33: 'rightArrow', 34: 'leftArrow'}
+                prst_map = {1: 'rect', 5: 'roundRect', 9: 'ellipse', 33: 'rightArrow', 34: 'leftArrow', 78: 'flowChartOr'}
                 prst = prst_map.get(auto_val, 'rect')
         geom = etree.SubElement(spPr, qn('a:prstGeom'))
         geom.set('prst', prst)
@@ -562,6 +566,10 @@ def _apply_text_xml(el, text_meta):
                 rPr.set('i', '1')
             if run_meta.get("underline"):
                 rPr.set('u', '1')
+            if run_meta.get("superscript"):
+                rPr.set('baseline', '30000')
+            if run_meta.get("subscript"):
+                rPr.set('baseline', '-25000')
 
             font_name = run_meta.get("font_name")
             if font_name:
@@ -1176,6 +1184,19 @@ def _apply_text(shape, text_meta):
                 run.font.italic = True
             if run_meta.get("underline"):
                 run.font.underline = True
+            # Superscript/subscript via baseline
+            if run_meta.get("superscript"):
+                rPr = run._r.find('{%s}rPr' % A_NS)
+                if rPr is None:
+                    rPr = etree.Element('{%s}rPr' % A_NS)
+                    run._r.insert(0, rPr)
+                rPr.set('baseline', '30000')
+            if run_meta.get("subscript"):
+                rPr = run._r.find('{%s}rPr' % A_NS)
+                if rPr is None:
+                    rPr = etree.Element('{%s}rPr' % A_NS)
+                    run._r.insert(0, rPr)
+                rPr.set('baseline', '-25000')
             if run_meta.get("font_name"):
                 run.font.name = run_meta["font_name"]
             if run_meta.get("font_color"):
