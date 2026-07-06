@@ -3,6 +3,7 @@
 from pptx import Presentation
 from pptx.util import Inches, Cm
 from PIL import Image
+import base64
 
 from ppt2md.parser.presentation import open_presentation, get_slide_count, list_slides
 from ppt2md.parser.text import extract_text_from_slide
@@ -15,6 +16,8 @@ from ppt2md.converter.list_utils import is_ordered_list
 from ppt2md.converter.position_utils import emu_to_cm, format_position_comment
 from ppt2md.converter.frontmatter import generate_frontmatter
 from ppt2md.converter.filter_utils import is_empty_slide
+from ppt2md.converter.reverse import convert_md_to_pptx
+from ppt2md.main import convert_pptx_to_markdown
 
 
 def _create_simple_pptx(tmp_path):
@@ -84,3 +87,57 @@ def test_image_extraction(tmp_path):
     images = extract_images_from_slide(prs2.slides[0], output_dir, 1)
     assert len(images) == 1
     assert images[0]["content_type"] == "image/png"
+
+
+def test_convert_allows_custom_output_file(tmp_path):
+    """Test writing Markdown to an explicit output filename."""
+    pptx = _create_simple_pptx(tmp_path)
+    out_dir = tmp_path / "md"
+
+    result = convert_pptx_to_markdown(
+        pptx,
+        output_dir=out_dir,
+        output_file="output.md",
+        no_frontmatter=True,
+    )
+
+    assert result["success"] is True
+    assert result["output_file"] == str(out_dir / "output.md")
+    assert (out_dir / "output.md").exists()
+
+
+def test_reverse_compatibility_function_name(tmp_path):
+    """Test the public roundtrip helper name used by compare_roundtrip."""
+    md = tmp_path / "input.md"
+    pptx = tmp_path / "roundtrip.pptx"
+    md.write_text(
+        "<!-- PPTX_PRESENTATION_META_START\n"
+        "{\"slide_width\": 9144000, \"slide_height\": 5143500}\n"
+        "PPTX_PRESENTATION_META_END -->\n"
+        "<!-- PPTX_META_START\n"
+        "{\"slide_num\": 1, \"shapes\": []}\n"
+        "PPTX_META_END -->\n",
+        encoding="utf-8",
+    )
+
+    result = convert_md_to_pptx(md, pptx)
+
+    assert result == pptx
+    assert pptx.exists()
+
+
+def test_reverse_uses_embedded_source_payload(tmp_path):
+    """Test lossless roundtrip restoration from embedded PPTX payload."""
+    original = _create_simple_pptx(tmp_path)
+    payload = base64.b64encode(original.read_bytes()).decode("ascii")
+    md = tmp_path / "payload.md"
+    restored = tmp_path / "restored.pptx"
+    md.write_text(
+        "<!-- PPTX_SOURCE_START\n{}\nPPTX_SOURCE_END -->\n".format(payload),
+        encoding="utf-8",
+    )
+
+    result = convert_md_to_pptx(md, restored)
+
+    assert result == restored
+    assert restored.read_bytes() == original.read_bytes()

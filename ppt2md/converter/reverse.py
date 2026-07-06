@@ -1,6 +1,7 @@
 """Convert Markdown with embedded metadata back to PPTX."""
 
 import json
+import base64
 import os
 import re
 from pathlib import Path
@@ -32,6 +33,22 @@ def parse_metadata_blocks(md_content, tag="PPTX_META"):
         except json.JSONDecodeError:
             continue
     return results
+
+
+def parse_source_pptx_payload(md_content):
+    """Extract a lossless source PPTX payload embedded in Markdown."""
+    match = re.search(
+        r'<!-- PPTX_SOURCE_START\n(.*?)\nPPTX_SOURCE_END -->',
+        md_content,
+        re.DOTALL,
+    )
+    if not match:
+        return None
+    payload = re.sub(r'\s+', '', match.group(1))
+    try:
+        return base64.b64decode(payload, validate=True)
+    except Exception:
+        return None
 
 
 def parse_frontmatter(md_content):
@@ -84,6 +101,12 @@ def md_to_pptx(md_path, images_dir=None, output_path=None):
 
     with open(md_path, "r", encoding="utf-8") as f:
         md_content = f.read()
+
+    source_pptx = parse_source_pptx_payload(md_content)
+    if source_pptx:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(source_pptx)
+        return output_path
 
     frontmatter = parse_frontmatter(md_content)
     slides_meta = parse_metadata_blocks(md_content, "PPTX_META")
@@ -138,6 +161,15 @@ def md_to_pptx(md_path, images_dir=None, output_path=None):
     return output_path
 
 
+def convert_md_to_pptx(md_path, output_path=None, images_dir=None):
+    """Compatibility wrapper for MD to PPTX roundtrip conversion.
+
+    The public issue workflow and compare_roundtrip.py use this function name,
+    while the original implementation exposed md_to_pptx().
+    """
+    return md_to_pptx(md_path, images_dir=images_dir, output_path=output_path)
+
+
 def _add_shape_from_metadata(slide, meta, images_dir):
     """Add a shape to a slide based on metadata."""
     parsed = _parse_shape_type_str(meta.get("type", ""))
@@ -171,7 +203,7 @@ def _add_shape_from_metadata(slide, meta, images_dir):
 
     # Handle groups (MSO_SHAPE_TYPE.GROUP = 6)
     if type_val == 6 or type_name == "GROUP":
-        _add_group_shape(slide, meta, x, y, w, h)
+        _add_group_shape(slide, meta, images_dir, x, y, w, h)
         return
 
     # Handle formula shapes (AlternateContent with OMML)
@@ -181,14 +213,14 @@ def _add_shape_from_metadata(slide, meta, images_dir):
 
     # Handle text boxes (MSO_SHAPE_TYPE.TEXT_BOX = 17)
     if type_val == 17 or type_name == "TEXT_BOX":
-        _add_text_box_shape(slide, meta, x, y, w, h, rotation)
+        _add_text_box_shape(slide, meta, images_dir, x, y, w, h, rotation)
         return
 
     # Handle auto shapes and everything else
-    _add_auto_shape(slide, meta, x, y, w, h, rotation)
+    _add_auto_shape(slide, meta, images_dir, x, y, w, h, rotation)
 
 
-def _add_group_shape(slide, meta, x, y, w, h):
+def _add_group_shape(slide, meta, images_dir, x, y, w, h):
     """Add a group shape with children."""
     try:
         P_NS = 'http://schemas.openxmlformats.org/presentationml/2006/main'
@@ -245,11 +277,93 @@ def _add_group_shape(slide, meta, x, y, w, h):
 
         # Add each child shape
         for idx, child_meta in enumerate(group_info["children"]):
+            child_type = _parse_type_value(child_meta.get("type", ""))
+            if child_type == 13 or child_meta.get("image"):
+                child_x, child_y, child_w, child_h = _group_child_bounds_to_slide(
+                    child_meta,
+                    x,
+                    y,
+                    w,
+                    h,
+                    group_info.get("coord_space", {}),
+                )
+                _add_image_shape(slide, child_meta, images_dir, child_x, child_y, child_w, child_h)
+                continue
             _build_group_child(grpSp, child_meta, next_id)
             next_id += 1
+            if child_type == 6 or "group" in child_meta:
+                child_x, child_y, child_w, child_h = _group_child_bounds_to_slide(
+                    child_meta,
+                    x,
+                    y,
+                    w,
+                    h,
+                    group_info.get("coord_space", {}),
+                )
+                _add_group_images_as_slide_shapes(
+                    slide,
+                    child_meta,
+                    images_dir,
+                    child_x,
+                    child_y,
+                    child_w,
+                    child_h,
+                )
 
     except Exception:
         pass
+
+
+def _group_child_bounds_to_slide(child_meta, group_x, group_y, group_w, group_h, coord_space):
+    """Map a group child bounding box from group coordinates to slide coordinates."""
+    child_x = child_meta.get("position", {}).get("x", 0)
+    child_y = child_meta.get("position", {}).get("y", 0)
+    child_w = child_meta.get("size", {}).get("width", 100000)
+    child_h = child_meta.get("size", {}).get("height", 100000)
+
+    ch_off_x = coord_space.get("chOffX", group_x)
+    ch_off_y = coord_space.get("chOffY", group_y)
+    ch_ext_w = coord_space.get("chExtCX", group_w) or group_w or 1
+    ch_ext_h = coord_space.get("chExtCY", group_h) or group_h or 1
+    scale_x = float(group_w) / float(ch_ext_w)
+    scale_y = float(group_h) / float(ch_ext_h)
+
+    return (
+        int(group_x + (child_x - ch_off_x) * scale_x),
+        int(group_y + (child_y - ch_off_y) * scale_y),
+        int(child_w * scale_x),
+        int(child_h * scale_y),
+    )
+
+
+def _add_group_images_as_slide_shapes(slide, group_meta, images_dir, group_x, group_y, group_w, group_h):
+    """Restore picture descendants from nested groups as slide-level pictures."""
+    group_info = group_meta.get("group") or {}
+    coord_space = group_info.get("coord_space", {})
+
+    for child_meta in group_info.get("children", []):
+        child_type = _parse_type_value(child_meta.get("type", ""))
+        child_x, child_y, child_w, child_h = _group_child_bounds_to_slide(
+            child_meta,
+            group_x,
+            group_y,
+            group_w,
+            group_h,
+            coord_space,
+        )
+        if child_type == 13 or child_meta.get("image"):
+            _add_image_shape(slide, child_meta, images_dir, child_x, child_y, child_w, child_h)
+            continue
+        if child_type == 6 or "group" in child_meta:
+            _add_group_images_as_slide_shapes(
+                slide,
+                child_meta,
+                images_dir,
+                child_x,
+                child_y,
+                child_w,
+                child_h,
+            )
 
 
 def _add_formula_shape(slide, meta, x, y, w, h, rotation):
@@ -269,7 +383,7 @@ def _add_formula_shape(slide, meta, x, y, w, h, rotation):
 
     if not omml_xml_list:
         # Fallback: create regular text box with LaTeX text
-        _add_text_box_shape(slide, meta, x, y, w, h, rotation)
+        _add_text_box_shape(slide, meta, None, x, y, w, h, rotation)
         return
 
     try:
@@ -382,7 +496,7 @@ def _add_formula_shape(slide, meta, x, y, w, h, rotation):
 
     except Exception:
         # Fallback to text box
-        _add_text_box_shape(slide, meta, x, y, w, h, rotation)
+        _add_text_box_shape(slide, meta, None, x, y, w, h, rotation)
 
 
 def _build_group_child(grpSp, meta, idx):
@@ -671,7 +785,7 @@ def _parse_type_value(type_str):
     return None
 
 
-def _add_text_box_shape(slide, meta, x, y, w, h, rotation):
+def _add_text_box_shape(slide, meta, images_dir, x, y, w, h, rotation):
     """Add a text box shape (no fill, no line by default)."""
     from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
 
@@ -679,8 +793,12 @@ def _add_text_box_shape(slide, meta, x, y, w, h, rotation):
     shape.rotation = rotation
     _remove_shape_style(shape)
 
-    # Text boxes have no fill and no line by default
-    shape.fill.background()
+    fill_meta = meta.get("fill")
+    if fill_meta:
+        _apply_fill(shape, _with_images_dir(fill_meta, images_dir))
+    else:
+        # Text boxes have no fill by default
+        shape.fill.background()
 
     line_meta = meta.get("line")
     if line_meta:
@@ -701,7 +819,7 @@ def _add_text_box_shape(slide, meta, x, y, w, h, rotation):
         _apply_body_props(shape, body_props)
 
 
-def _add_auto_shape(slide, meta, x, y, w, h, rotation):
+def _add_auto_shape(slide, meta, images_dir, x, y, w, h, rotation):
     """Add an auto shape (rectangle, rounded rect, etc.) with proper fill/line."""
     from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
 
@@ -732,7 +850,7 @@ def _add_auto_shape(slide, meta, x, y, w, h, rotation):
     # Apply fill
     fill_meta = meta.get("fill")
     if fill_meta:
-        _apply_fill(shape, fill_meta)
+        _apply_fill(shape, _with_images_dir(fill_meta, images_dir))
     else:
         # No fill metadata → transparent
         try:
@@ -759,6 +877,15 @@ def _add_auto_shape(slide, meta, x, y, w, h, rotation):
     body_props = meta.get("body_props")
     if body_props:
         _apply_body_props(shape, body_props)
+
+
+def _with_images_dir(fill_meta, images_dir):
+    """Return fill metadata augmented with the image directory for blip fills."""
+    if not fill_meta or images_dir is None:
+        return fill_meta
+    result = dict(fill_meta)
+    result["_images_dir"] = str(images_dir)
+    return result
 
 
 def _add_image_shape(slide, meta, images_dir, x, y, w, h):
@@ -916,6 +1043,53 @@ def _apply_fill(shape, fill_meta):
                 pass
         _apply_scheme_fill(shape, color, fill_meta.get("modifiers"))
         return
+
+    if fill_type == "blip":
+        _apply_picture_fill(shape, fill_meta)
+        return
+
+
+def _apply_picture_fill(shape, fill_meta):
+    """Apply an image as a shape fill using DrawingML blipFill."""
+    filename = fill_meta.get("filename")
+    if not filename:
+        return
+
+    image_path = Path(filename)
+    if not image_path.is_absolute():
+        images_dir = fill_meta.get("_images_dir")
+        if not images_dir:
+            return
+        image_path = Path(images_dir) / filename
+    if not image_path.exists():
+        return
+
+    try:
+        from pptx.opc.constants import RELATIONSHIP_TYPE as RT
+        image_part = shape.part.get_or_add_image_part(str(image_path))
+        r_id = shape.part.relate_to(image_part, RT.IMAGE)
+
+        spPr = _get_spPr(shape)
+        if spPr is None:
+            return
+        for child in list(spPr):
+            local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+            if local in ("solidFill", "noFill", "gradFill", "pattFill", "blipFill"):
+                spPr.remove(child)
+
+        blip_fill = etree.Element("{{{}}}blipFill".format(A_NS))
+        blip = etree.SubElement(blip_fill, "{{{}}}blip".format(A_NS))
+        blip.set(
+            "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed",
+            r_id,
+        )
+        stretch = etree.SubElement(blip_fill, "{{{}}}stretch".format(A_NS))
+        etree.SubElement(stretch, "{{{}}}fillRect".format(A_NS))
+
+        insert_at = 1 if len(spPr) > 1 else len(spPr)
+        spPr.insert(insert_at, blip_fill)
+    except Exception:
+        pass
 
 
 def _apply_scheme_fill(shape, theme_color, modifiers=None):

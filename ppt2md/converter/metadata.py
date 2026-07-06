@@ -21,7 +21,7 @@ def _safe_color(color_obj):
     return None
 
 
-def _get_fill_info(shape, theme_color_map=None):
+def _get_fill_info(shape, theme_color_map=None, image_filename_map=None, shape_path=None):
     """Extract fill information from shape XML.
 
     Args:
@@ -58,6 +58,15 @@ def _get_fill_info(shape, theme_color_map=None):
     no_fill = spPr.find("{{{}}}noFill".format(A_NS))
     if no_fill is not None:
         return {"type": "none"}
+
+    blip_fill = spPr.find("{{{}}}blipFill".format(A_NS))
+    if blip_fill is not None:
+        info = {"type": "blip"}
+        if image_filename_map and shape_path is not None:
+            filename = image_filename_map.get((tuple(shape_path), "fill"))
+            if filename:
+                info["filename"] = filename
+        return info
 
     return None
 
@@ -347,7 +356,7 @@ def _get_body_props(shape):
         return None
 
 
-def _get_group_info(shape):
+def _get_group_info(shape, theme_color_map=None, image_filename_map=None, shape_path=None):
     """Extract group shape info including children and coordinate space."""
     try:
         # Get group coordinate space (chOff/chExt)
@@ -368,8 +377,14 @@ def _get_group_info(shape):
         # Extract children metadata
         children = []
         if hasattr(shape, 'shapes'):
-            for child in shape.shapes:
-                child_meta = extract_shape_metadata(child)
+            for idx, child in enumerate(shape.shapes):
+                child_path = tuple(shape_path + (idx,)) if shape_path is not None else None
+                child_meta = extract_shape_metadata(
+                    child,
+                    theme_color_map,
+                    image_filename_map,
+                    child_path,
+                )
                 children.append(child_meta)
 
         result = {"children": children}
@@ -380,7 +395,7 @@ def _get_group_info(shape):
         return None
 
 
-def extract_shape_metadata(shape, theme_color_map=None):
+def extract_shape_metadata(shape, theme_color_map=None, image_filename_map=None, shape_path=None):
     """Extract comprehensive metadata for a shape.
 
     Args:
@@ -405,7 +420,12 @@ def extract_shape_metadata(shape, theme_color_map=None):
 
     # Handle GROUP shapes (MSO_SHAPE_TYPE.GROUP = 6)
     if shape.shape_type == 6:
-        meta["group"] = _get_group_info(shape)
+        meta["group"] = _get_group_info(
+            shape,
+            theme_color_map,
+            image_filename_map,
+            tuple(shape_path) if shape_path is not None else None,
+        )
         return meta
 
     # Auto shape type
@@ -423,7 +443,7 @@ def extract_shape_metadata(shape, theme_color_map=None):
         }
 
     # Fill
-    fill_info = _get_fill_info(shape, theme_color_map)
+    fill_info = _get_fill_info(shape, theme_color_map, image_filename_map, shape_path)
     if fill_info:
         meta["fill"] = fill_info
 
@@ -448,6 +468,10 @@ def extract_shape_metadata(shape, theme_color_map=None):
             "content_type": shape.image.content_type,
             "blob_size": len(shape.image.blob),
         }
+        if image_filename_map and shape_path is not None:
+            filename = image_filename_map.get(tuple(shape_path))
+            if filename:
+                meta["image"]["filename"] = filename
 
     # Table
     if hasattr(shape, "has_table") and shape.has_table:
