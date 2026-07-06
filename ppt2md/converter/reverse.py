@@ -392,36 +392,75 @@ def _add_formula_shape(slide, meta, x, y, w, h, rotation):
 
         choice_sp = etree.fromstring(choice_sp_xml.encode())
 
-        # Add regular text runs from metadata (before OMML elements)
+        # Add elements in original order (text runs interleaved with OMML formulas)
         p_el = choice_sp.find('.//{%s}p' % A_NS)
         text_meta = meta.get('text', {})
-        for para in text_meta.get('paragraphs', []):
-            for run_meta in para.get('runs', []):
-                text = run_meta.get('text', '')
-                # Skip formula text (starts with $) - it's handled by OMML
-                if text.startswith('$') and text.endswith('$'):
-                    continue
-                if not text:
-                    continue
-                # Add as a regular a:r element
-                r = etree.SubElement(p_el, qn('a:r'))
-                rPr = etree.SubElement(r, qn('a:rPr'))
-                if run_meta.get('font_size'):
-                    rPr.set('sz', str(int(run_meta['font_size'] * 100 / 12700)))
-                if run_meta.get('bold'):
-                    rPr.set('b', '1')
-                if run_meta.get('superscript'):
-                    rPr.set('baseline', '30000')
-                if run_meta.get('subscript'):
-                    rPr.set('baseline', '-25000')
-                t = etree.SubElement(r, qn('a:t'))
-                t.text = text
+        omml_inserted = [False]  # track if we've already injected OMML
 
-        # Inject OMML XML into the a:p element (after regular text)
-        for omml_xml in omml_xml_list:
-            omml_el = etree.fromstring(omml_xml.encode())
-            if p_el is not None:
-                p_el.append(omml_el)
+        for para in text_meta.get('paragraphs', []):
+            ordered = para.get('_ordered_elements', None)
+            runs = para.get('runs', [])
+
+            if ordered:
+                # Use ordered elements to interleave text and OMML correctly
+                for elem in ordered:
+                    if elem["type"] == "text":
+                        run_meta = runs[elem["idx"]]
+                        text = run_meta.get('text', '')
+                        # Skip formula text (starts with $) - it's handled by OMML
+                        if text.startswith('$') and text.endswith('$'):
+                            continue
+                        if not text:
+                            continue
+                        r = etree.SubElement(p_el, qn('a:r'))
+                        rPr = etree.SubElement(r, qn('a:rPr'))
+                        if run_meta.get('font_size'):
+                            rPr.set('sz', str(int(run_meta['font_size'] * 100 / 12700)))
+                        if run_meta.get('bold'):
+                            rPr.set('b', '1')
+                        if run_meta.get('superscript'):
+                            rPr.set('baseline', '30000')
+                        if run_meta.get('subscript'):
+                            rPr.set('baseline', '-25000')
+                        t = etree.SubElement(r, qn('a:t'))
+                        t.text = text
+                    elif elem["type"] == "omml" and not omml_inserted[0]:
+                        # Inject OMML XML at correct position
+                        for omml_xml in omml_xml_list:
+                            omml_el = etree.fromstring(omml_xml.encode())
+                            p_el.append(omml_el)
+                        omml_inserted[0] = True
+                # If OMML not inserted yet (e.g., at end of ordered list), append now
+                if not omml_inserted[0]:
+                    for omml_xml in omml_xml_list:
+                        omml_el = etree.fromstring(omml_xml.encode())
+                        p_el.append(omml_el)
+            else:
+                # Legacy path: no ordering info, text runs first then OMML
+                for run_meta in runs:
+                    text = run_meta.get('text', '')
+                    if text.startswith('$') and text.endswith('$'):
+                        continue
+                    if not text:
+                        continue
+                    r = etree.SubElement(p_el, qn('a:r'))
+                    rPr = etree.SubElement(r, qn('a:rPr'))
+                    if run_meta.get('font_size'):
+                        rPr.set('sz', str(int(run_meta['font_size'] * 100 / 12700)))
+                    if run_meta.get('bold'):
+                        rPr.set('b', '1')
+                    if run_meta.get('superscript'):
+                        rPr.set('baseline', '30000')
+                    if run_meta.get('subscript'):
+                        rPr.set('baseline', '-25000')
+                    t = etree.SubElement(r, qn('a:t'))
+                    t.text = text
+
+                # Inject OMML XML into the a:p element (after regular text)
+                for omml_xml in omml_xml_list:
+                    omml_el = etree.fromstring(omml_xml.encode())
+                    if p_el is not None:
+                        p_el.append(omml_el)
 
         # Fallback XML
         fb_xml = """<p:sp xmlns:p="%s" xmlns:a="%s">

@@ -636,13 +636,6 @@ def extract_alternate_content_shapes(slide):
 
             formula_text = ' '.join(latex_parts) if latex_parts else ''
 
-            # Also extract any regular text from the shape
-            text_parts = []
-            if txBody is not None:
-                for t_el in txBody.iter('{%s}t' % A_NS):
-                    if t_el.text:
-                        text_parts.append(t_el.text)
-
             meta = {
                 "name": shape_name,
                 "type": "AUTO_SHAPE (1)",
@@ -658,19 +651,47 @@ def extract_alternate_content_shapes(slide):
             }
 
             # Build text content: combine regular text with formula
+            # Preserve original element order for correct rendering
             para_info = {"level": 0, "alignment": None, "runs": []}
+            ordered_elements = []  # tracks original order: {"type": "text", "idx": N} or {"type": "omml", "idx": N}
 
-            if text_parts:
-                run_info = {"text": ''.join(text_parts)}
-                para_info["runs"].append(run_info)
+            if txBody is not None:
+                ap = txBody.find('{%s}p' % A_NS)
+                if ap is not None:
+                    for child in ap:
+                        local = child.tag.split('}')[1] if '}' in child.tag else child.tag
+                        if local == 'r':
+                            t_el = child.find('{%s}t' % A_NS)
+                            if t_el is not None and t_el.text:
+                                rPr = child.find('{%s}rPr' % A_NS)
+                                run_info = {"text": t_el.text}
+                                if rPr is not None:
+                                    baseline = rPr.get("baseline")
+                                    if baseline:
+                                        val = int(baseline)
+                                        run_info["superscript"] = val > 0
+                                        run_info["subscript"] = val < 0
+                                para_info["runs"].append(run_info)
+                                ordered_elements.append({"type": "text", "idx": len(para_info["runs"]) - 1})
+                        elif local == 'm' or local == 'f' or (local == 's' and child.tag.endswith('}m')):
+                            # OMML element (a14:m wraps m:oMath)
+                            ordered_elements.append({"type": "omml", "idx": -1})
+                        elif local == 'endParaRPr':
+                            pass
 
             if formula_text:
-                # Placeholder text that indicates a formula
                 formula_display = "$%s$" % formula_text
                 run_info_f = {"text": formula_display}
-                para_info["runs"].append(run_info_f)
+                # Only add formula run if not already in runs (dedup)
+                has_formula_in_runs = any(
+                    r.get("text", "").startswith("$") for r in para_info["runs"]
+                )
+                if not has_formula_in_runs:
+                    para_info["runs"].append(run_info_f)
+                    ordered_elements.append({"type": "text", "idx": len(para_info["runs"]) - 1})
 
             if para_info["runs"]:
+                para_info["_ordered_elements"] = ordered_elements
                 meta["text"]["paragraphs"].append(para_info)
 
             shapes_meta.append(meta)
