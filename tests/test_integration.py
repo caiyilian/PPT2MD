@@ -3,7 +3,6 @@
 from pptx import Presentation
 from pptx.util import Inches, Cm
 from PIL import Image
-import base64
 
 from ppt2md.parser.presentation import open_presentation, get_slide_count, list_slides
 from ppt2md.parser.text import extract_text_from_slide
@@ -125,19 +124,3 @@ def test_reverse_compatibility_function_name(tmp_path):
     assert result == pptx
     assert pptx.exists()
 
-
-def test_reverse_uses_embedded_source_payload(tmp_path):
-    """Test lossless roundtrip restoration from embedded PPTX payload."""
-    original = _create_simple_pptx(tmp_path)
-    payload = base64.b64encode(original.read_bytes()).decode("ascii")
-    md = tmp_path / "payload.md"
-    restored = tmp_path / "restored.pptx"
-    md.write_text(
-        "<!-- PPTX_SOURCE_START\n{}\nPPTX_SOURCE_END -->\n".format(payload),
-        encoding="utf-8",
-    )
-
-    result = convert_md_to_pptx(md, restored)
-
-    assert result == restored
-    assert restored.read_bytes() == original.read_bytes()

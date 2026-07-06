@@ -38,11 +38,19 @@ def _get_fill_info(shape, theme_color_map=None, image_filename_map=None, shape_p
     if solid is not None:
         srgb = solid.find("{{{}}}srgbClr".format(A_NS))
         if srgb is not None:
-            return {"type": "solid", "color": srgb.get("val")}
+            return {
+                "type": "solid",
+                "color": srgb.get("val"),
+                "xml": etree.tostring(solid, encoding="unicode"),
+            }
         scheme = solid.find("{{{}}}schemeClr".format(A_NS))
         if scheme is not None:
             scheme_name = scheme.get("val")
-            info = {"type": "scheme", "color": scheme_name}
+            info = {
+                "type": "scheme",
+                "color": scheme_name,
+                "xml": etree.tostring(solid, encoding="unicode"),
+            }
             modifiers = _get_color_modifiers(scheme)
             if modifiers:
                 info["modifiers"] = modifiers
@@ -55,9 +63,16 @@ def _get_fill_info(shape, theme_color_map=None, image_filename_map=None, shape_p
                     info["_resolved"] = resolved
             return info
 
+    grad_fill = spPr.find("{{{}}}gradFill".format(A_NS))
+    if grad_fill is not None:
+        return {
+            "type": "gradient",
+            "xml": etree.tostring(grad_fill, encoding="unicode"),
+        }
+
     no_fill = spPr.find("{{{}}}noFill".format(A_NS))
     if no_fill is not None:
-        return {"type": "none"}
+        return {"type": "none", "xml": etree.tostring(no_fill, encoding="unicode")}
 
     blip_fill = spPr.find("{{{}}}blipFill".format(A_NS))
     if blip_fill is not None:
@@ -164,7 +179,10 @@ def _get_line_info(shape):
         return None
 
     width = ln.get("w")
-    info = {"width": int(width) if width else 0}
+    info = {
+        "width": int(width) if width else 0,
+        "xml": etree.tostring(ln, encoding="unicode"),
+    }
 
     solid = ln.find(".//{{{}}}solidFill".format(A_NS))
     if solid is not None:
@@ -321,10 +339,10 @@ def _get_body_props(shape):
             return None
 
         props = {}
-        # wrap attribute
-        wrap = bodyPr.get('wrap')
-        if wrap is not None:
-            props['wrap'] = wrap
+        for attr in ('wrap', 'vert', 'anchor', 'rtlCol'):
+            val = bodyPr.get(attr)
+            if val is not None:
+                props[attr] = val
 
         # inset attributes (margins)
         for attr in ('lIns', 'rIns', 'tIns', 'bIns'):
@@ -407,6 +425,7 @@ def extract_shape_metadata(shape, theme_color_map=None, image_filename_map=None,
     meta = {
         "name": shape.name,
         "type": str(shape.shape_type),
+        "raw_xml": etree.tostring(shape.element, encoding="unicode"),
         "position": {
             "x": shape.left,
             "y": shape.top,

@@ -1,10 +1,8 @@
 """CLI entry point for ppt2md."""
 
 import argparse
-import base64
 import os
 import sys
-import textwrap
 from pathlib import Path
 
 from ppt2md.parser.presentation import open_presentation, get_slide_count
@@ -83,15 +81,6 @@ def convert_pptx_to_markdown(input_path, output_dir=None, include_notes=False,
     }, ensure_ascii=False)
     md_parts.append("\n<!-- PPTX_PRESENTATION_META_START\n{}\nPPTX_PRESENTATION_META_END -->".format(pres_meta))
 
-    try:
-        source_payload = base64.b64encode(input_path.read_bytes()).decode("ascii")
-        wrapped_payload = "\n".join(textwrap.wrap(source_payload, 76))
-        md_parts.append(
-            "\n<!-- PPTX_SOURCE_START\n{}\nPPTX_SOURCE_END -->".format(wrapped_payload)
-        )
-    except OSError:
-        pass
-
     sections = get_sections(prs)
     section_map = {}
     for sec in sections:
@@ -120,7 +109,8 @@ def convert_pptx_to_markdown(input_path, output_dir=None, include_notes=False,
 
         md_parts.append("\n---\n\n## Slide {}".format(slide_num))
 
-        sorted_shapes = sort_shapes_by_position(list(slide.shapes))
+        shapes_in_z_order = list(slide.shapes)
+        sorted_shapes = sort_shapes_by_position(shapes_in_z_order)
 
         # Build theme color map for resolving scheme colors to absolute values
         theme_color_map = None
@@ -156,11 +146,11 @@ def convert_pptx_to_markdown(input_path, output_dir=None, include_notes=False,
             img_filename_map[(key, img_info.get("kind", "picture"))] = img_info["filename"]
 
         shape_metadata = []
-        for shape in sorted_shapes:
-            idx = list(slide.shapes).index(shape)
+        for idx, shape in enumerate(shapes_in_z_order):
             meta = extract_shape_metadata(shape, theme_color_map, img_filename_map, (idx,))
             shape_metadata.append(meta)
 
+        for shape in sorted_shapes:
             shape_md = _process_shape(shape, slide, slide_num, images_dir, media_dir,
                                        seen_rids, formula_as_image, keep_original_format,
                                        verbose, errors)

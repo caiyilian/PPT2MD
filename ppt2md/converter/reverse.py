@@ -1,7 +1,6 @@
 """Convert Markdown with embedded metadata back to PPTX."""
 
 import json
-import base64
 import os
 import re
 from pathlib import Path
@@ -33,22 +32,6 @@ def parse_metadata_blocks(md_content, tag="PPTX_META"):
         except json.JSONDecodeError:
             continue
     return results
-
-
-def parse_source_pptx_payload(md_content):
-    """Extract a lossless source PPTX payload embedded in Markdown."""
-    match = re.search(
-        r'<!-- PPTX_SOURCE_START\n(.*?)\nPPTX_SOURCE_END -->',
-        md_content,
-        re.DOTALL,
-    )
-    if not match:
-        return None
-    payload = re.sub(r'\s+', '', match.group(1))
-    try:
-        return base64.b64decode(payload, validate=True)
-    except Exception:
-        return None
 
 
 def parse_frontmatter(md_content):
@@ -101,12 +84,6 @@ def md_to_pptx(md_path, images_dir=None, output_path=None):
 
     with open(md_path, "r", encoding="utf-8") as f:
         md_content = f.read()
-
-    source_pptx = parse_source_pptx_payload(md_content)
-    if source_pptx:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(source_pptx)
-        return output_path
 
     frontmatter = parse_frontmatter(md_content)
     slides_meta = parse_metadata_blocks(md_content, "PPTX_META")
@@ -198,6 +175,8 @@ def _add_shape_from_metadata(slide, meta, images_dir):
 
     # Handle lines/arrows (MSO_SHAPE_TYPE.LINE = 9)
     if type_val == 9 or type_name == "LINE":
+        if _add_raw_shape_xml(slide, meta.get("raw_xml")):
+            return
         _add_line_shape(slide, meta, x, y, w, h, rotation)
         return
 
@@ -277,41 +256,23 @@ def _add_group_shape(slide, meta, images_dir, x, y, w, h):
 
         # Add each child shape
         for idx, child_meta in enumerate(group_info["children"]):
-            child_type = _parse_type_value(child_meta.get("type", ""))
-            if child_type == 13 or child_meta.get("image"):
-                child_x, child_y, child_w, child_h = _group_child_bounds_to_slide(
-                    child_meta,
-                    x,
-                    y,
-                    w,
-                    h,
-                    group_info.get("coord_space", {}),
-                )
-                _add_image_shape(slide, child_meta, images_dir, child_x, child_y, child_w, child_h)
-                continue
-            _build_group_child(grpSp, child_meta, next_id)
+            _build_group_child(grpSp, child_meta, next_id, slide, images_dir)
             next_id += 1
-            if child_type == 6 or "group" in child_meta:
-                child_x, child_y, child_w, child_h = _group_child_bounds_to_slide(
-                    child_meta,
-                    x,
-                    y,
-                    w,
-                    h,
-                    group_info.get("coord_space", {}),
-                )
-                _add_group_images_as_slide_shapes(
-                    slide,
-                    child_meta,
-                    images_dir,
-                    child_x,
-                    child_y,
-                    child_w,
-                    child_h,
-                )
 
     except Exception:
         pass
+
+
+def _add_raw_shape_xml(slide, raw_xml):
+    """Append raw shape XML when it has no external relationships to remap."""
+    if not raw_xml:
+        return False
+    try:
+        el = etree.fromstring(raw_xml.encode("utf-8"))
+        slide.shapes._spTree.append(el)
+        return True
+    except Exception:
+        return False
 
 
 def _group_child_bounds_to_slide(child_meta, group_x, group_y, group_w, group_h, coord_space):
@@ -334,36 +295,6 @@ def _group_child_bounds_to_slide(child_meta, group_x, group_y, group_w, group_h,
         int(child_w * scale_x),
         int(child_h * scale_y),
     )
-
-
-def _add_group_images_as_slide_shapes(slide, group_meta, images_dir, group_x, group_y, group_w, group_h):
-    """Restore picture descendants from nested groups as slide-level pictures."""
-    group_info = group_meta.get("group") or {}
-    coord_space = group_info.get("coord_space", {})
-
-    for child_meta in group_info.get("children", []):
-        child_type = _parse_type_value(child_meta.get("type", ""))
-        child_x, child_y, child_w, child_h = _group_child_bounds_to_slide(
-            child_meta,
-            group_x,
-            group_y,
-            group_w,
-            group_h,
-            coord_space,
-        )
-        if child_type == 13 or child_meta.get("image"):
-            _add_image_shape(slide, child_meta, images_dir, child_x, child_y, child_w, child_h)
-            continue
-        if child_type == 6 or "group" in child_meta:
-            _add_group_images_as_slide_shapes(
-                slide,
-                child_meta,
-                images_dir,
-                child_x,
-                child_y,
-                child_w,
-                child_h,
-            )
 
 
 def _add_formula_shape(slide, meta, x, y, w, h, rotation):
@@ -499,7 +430,7 @@ def _add_formula_shape(slide, meta, x, y, w, h, rotation):
         _add_text_box_shape(slide, meta, None, x, y, w, h, rotation)
 
 
-def _build_group_child(grpSp, meta, idx):
+def _build_group_child(grpSp, meta, idx, slide=None, images_dir=None):
     """Build a child shape element inside a group."""
     P_NS = 'http://schemas.openxmlformats.org/presentationml/2006/main'
     A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
@@ -514,6 +445,14 @@ def _build_group_child(grpSp, meta, idx):
     h = meta.get("size", {}).get("height", 100000)
     rotation = meta.get("rotation", 0)
     name = meta.get("name", "Shape %d" % idx)
+
+    if type_val == 6 or "group" in meta:
+        _build_nested_group(grpSp, meta, idx, slide, images_dir)
+        return
+
+    if type_val == 13 or meta.get("image"):
+        _build_group_picture(grpSp, meta, idx, slide, images_dir)
+        return
 
     if type_val == 9:  # LINE / CONNECTOR
         el = etree.SubElement(grpSp, qn('p:cxnSp'))
@@ -551,8 +490,12 @@ def _build_group_child(grpSp, meta, idx):
             parsed = re.match(r'.*?\((\d+)\)', auto_type_str)
             if parsed:
                 auto_val = int(parsed.group(1))
-                prst_map = {1: 'rect', 5: 'roundRect', 9: 'ellipse', 33: 'rightArrow', 34: 'leftArrow', 78: 'flowChartOr'}
-                prst = prst_map.get(auto_val, 'rect')
+                try:
+                    from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
+                    prst = MSO_AUTO_SHAPE_TYPE(auto_val).xml_value
+                except Exception:
+                    prst_map = {1: 'rect', 5: 'roundRect', 9: 'ellipse', 33: 'rightArrow', 34: 'leftArrow', 77: 'flowChartSummingJunction', 78: 'flowChartOr'}
+                    prst = prst_map.get(auto_val, 'rect')
         geom = etree.SubElement(spPr, qn('a:prstGeom'))
         geom.set('prst', prst)
         etree.SubElement(geom, qn('a:avLst'))
@@ -584,10 +527,104 @@ def _build_group_child(grpSp, meta, idx):
         _apply_body_props_xml(el, body_props)
 
 
+def _build_nested_group(parent, meta, idx, slide=None, images_dir=None):
+    """Build a nested p:grpSp element."""
+    from pptx.oxml.ns import qn
+
+    group_info = meta.get("group") or {}
+    x = meta.get("position", {}).get("x", 0)
+    y = meta.get("position", {}).get("y", 0)
+    w = meta.get("size", {}).get("width", 100000)
+    h = meta.get("size", {}).get("height", 100000)
+
+    grp = etree.SubElement(parent, qn('p:grpSp'))
+    nv = etree.SubElement(grp, qn('p:nvGrpSpPr'))
+    cnvPr = etree.SubElement(nv, qn('p:cNvPr'))
+    cnvPr.set('id', str(idx))
+    cnvPr.set('name', meta.get("name", "Group %d" % idx))
+    etree.SubElement(nv, qn('p:cNvGrpSpPr'))
+    etree.SubElement(nv, qn('p:nvPr'))
+
+    grpSpPr = etree.SubElement(grp, qn('p:grpSpPr'))
+    xfrm = etree.SubElement(grpSpPr, qn('a:xfrm'))
+    off = etree.SubElement(xfrm, qn('a:off'))
+    off.set('x', str(x))
+    off.set('y', str(y))
+    ext = etree.SubElement(xfrm, qn('a:ext'))
+    ext.set('cx', str(w))
+    ext.set('cy', str(h))
+
+    cs = group_info.get("coord_space", {})
+    chOff = etree.SubElement(xfrm, qn('a:chOff'))
+    chOff.set('x', str(cs.get('chOffX', x)))
+    chOff.set('y', str(cs.get('chOffY', y)))
+    chExt = etree.SubElement(xfrm, qn('a:chExt'))
+    chExt.set('cx', str(cs.get('chExtCX', w)))
+    chExt.set('cy', str(cs.get('chExtCY', h)))
+
+    next_id = idx * 1000
+    for child in group_info.get("children", []):
+        _build_group_child(grp, child, next_id, slide, images_dir)
+        next_id += 1
+
+
+def _build_group_picture(parent, meta, idx, slide=None, images_dir=None):
+    """Build a p:pic element inside a group."""
+    from pptx.oxml.ns import qn
+
+    image_meta = meta.get("image", {})
+    filename = image_meta.get("filename")
+    if not slide or not images_dir or not filename:
+        return
+
+    img_path = Path(images_dir) / filename
+    if not img_path.exists():
+        return
+
+    _, r_id = slide.part.get_or_add_image_part(str(img_path))
+
+    x = meta.get("position", {}).get("x", 0)
+    y = meta.get("position", {}).get("y", 0)
+    w = meta.get("size", {}).get("width", 100000)
+    h = meta.get("size", {}).get("height", 100000)
+    name = meta.get("name", "Picture %d" % idx)
+
+    pic = etree.SubElement(parent, qn('p:pic'))
+    nv = etree.SubElement(pic, qn('p:nvPicPr'))
+    cnvPr = etree.SubElement(nv, qn('p:cNvPr'))
+    cnvPr.set('id', str(idx))
+    cnvPr.set('name', name)
+    etree.SubElement(nv, qn('p:cNvPicPr'))
+    etree.SubElement(nv, qn('p:nvPr'))
+
+    blipFill = etree.SubElement(pic, qn('p:blipFill'))
+    blip = etree.SubElement(blipFill, qn('a:blip'))
+    blip.set('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed', r_id)
+    stretch = etree.SubElement(blipFill, qn('a:stretch'))
+    etree.SubElement(stretch, qn('a:fillRect'))
+
+    spPr = etree.SubElement(pic, qn('p:spPr'))
+    xfrm = etree.SubElement(spPr, qn('a:xfrm'))
+    off = etree.SubElement(xfrm, qn('a:off'))
+    off.set('x', str(x))
+    off.set('y', str(y))
+    ext = etree.SubElement(xfrm, qn('a:ext'))
+    ext.set('cx', str(w))
+    ext.set('cy', str(h))
+    geom = etree.SubElement(spPr, qn('a:prstGeom'))
+    geom.set('prst', 'rect')
+    etree.SubElement(geom, qn('a:avLst'))
+
+
 def _apply_fill_xml(spPr, fill_meta):
     """Apply fill to an spPr XML element (used for group children)."""
     A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
     from pptx.oxml.ns import qn
+
+    raw_xml = fill_meta.get("xml")
+    if raw_xml:
+        _apply_raw_fill_to_spPr(spPr, raw_xml)
+        return
 
     fill_type = fill_meta.get("type")
     if fill_type == "none":
@@ -629,6 +666,11 @@ def _apply_line_xml(spPr, line_meta):
     """Apply line to an spPr XML element (used for group children)."""
     A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
     from pptx.oxml.ns import qn
+
+    raw_xml = line_meta.get("xml")
+    if raw_xml:
+        _apply_raw_line_to_spPr(spPr, raw_xml)
+        return
 
     width = line_meta.get("width", 0)
     color = line_meta.get("color")
@@ -749,9 +791,10 @@ def _apply_body_props_xml(el, body_props):
     if bodyPr is None:
         return
 
-    wrap = body_props.get('wrap')
-    if wrap is not None:
-        bodyPr.set('wrap', wrap)
+    for attr in ('wrap', 'vert', 'anchor', 'rtlCol'):
+        val = body_props.get(attr)
+        if val is not None:
+            bodyPr.set(attr, str(val))
 
     for attr in ('lIns', 'rIns', 'tIns', 'bIns'):
         val = body_props.get(attr)
@@ -830,15 +873,10 @@ def _add_auto_shape(slide, meta, images_dir, x, y, w, h, rotation):
         if parsed:
             auto_type_val = int(parsed.group(1))
 
-    auto_shape_map = {
-        1: MSO_AUTO_SHAPE_TYPE.RECTANGLE,
-        5: MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE,
-        9: MSO_AUTO_SHAPE_TYPE.OVAL,
-        33: MSO_AUTO_SHAPE_TYPE.RIGHT_ARROW,
-        34: MSO_AUTO_SHAPE_TYPE.LEFT_ARROW,
-    }
-
-    auto_type = auto_shape_map.get(auto_type_val, MSO_AUTO_SHAPE_TYPE.RECTANGLE)
+    try:
+        auto_type = MSO_AUTO_SHAPE_TYPE(auto_type_val)
+    except Exception:
+        auto_type = MSO_AUTO_SHAPE_TYPE.RECTANGLE
     try:
         shape = slide.shapes.add_shape(auto_type, x, y, w, h)
     except Exception:
@@ -886,6 +924,42 @@ def _with_images_dir(fill_meta, images_dir):
     result = dict(fill_meta)
     result["_images_dir"] = str(images_dir)
     return result
+
+
+def _apply_raw_fill_to_spPr(spPr, raw_xml):
+    """Replace fill XML under spPr with the original DrawingML fill element."""
+    try:
+        fill_el = etree.fromstring(raw_xml.encode("utf-8"))
+    except Exception:
+        return
+    fill_names = {"solidFill", "noFill", "gradFill", "pattFill", "blipFill"}
+    for child in list(spPr):
+        local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        if local in fill_names:
+            spPr.remove(child)
+
+    insert_at = len(spPr)
+    for idx, child in enumerate(spPr):
+        local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        if local == "ln":
+            insert_at = idx
+            break
+        if local == "prstGeom":
+            insert_at = idx + 1
+    spPr.insert(insert_at, fill_el)
+
+
+def _apply_raw_line_to_spPr(spPr, raw_xml):
+    """Replace line XML under spPr with the original DrawingML line element."""
+    try:
+        line_el = etree.fromstring(raw_xml.encode("utf-8"))
+    except Exception:
+        return
+    for child in list(spPr):
+        local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        if local == "ln":
+            spPr.remove(child)
+    spPr.append(line_el)
 
 
 def _add_image_shape(slide, meta, images_dir, x, y, w, h):
@@ -938,7 +1012,7 @@ def _add_line_shape(slide, meta, x, y, w, h, rotation):
     connector_geom = line_meta.get("connector_geom", "")
 
     conn_type = MSO_CONNECTOR_TYPE.STRAIGHT
-    if connector_geom == "bentConnector2":
+    if connector_geom and connector_geom.startswith("bentConnector"):
         conn_type = MSO_CONNECTOR_TYPE.ELBOW
 
     try:
@@ -1012,6 +1086,13 @@ def _apply_fill(shape, fill_meta):
 
     Handles solid (RGB), scheme (theme), and no-fill types.
     """
+    raw_xml = fill_meta.get("xml")
+    if raw_xml:
+        spPr = _get_spPr(shape)
+        if spPr is not None:
+            _apply_raw_fill_to_spPr(spPr, raw_xml)
+            return
+
     fill_type = fill_meta.get("type")
     color = fill_meta.get("color")
 
@@ -1065,9 +1146,7 @@ def _apply_picture_fill(shape, fill_meta):
         return
 
     try:
-        from pptx.opc.constants import RELATIONSHIP_TYPE as RT
-        image_part = shape.part.get_or_add_image_part(str(image_path))
-        r_id = shape.part.relate_to(image_part, RT.IMAGE)
+        _, r_id = shape.part.get_or_add_image_part(str(image_path))
 
         spPr = _get_spPr(shape)
         if spPr is None:
@@ -1137,6 +1216,13 @@ def _apply_line(shape, line_meta):
     Handles connectors and regular shapes. Creates a:ln XML element
     if needed for arrowhead support.
     """
+    raw_xml = line_meta.get("xml")
+    if raw_xml:
+        spPr = _get_spPr(shape)
+        if spPr is not None:
+            _apply_raw_line_to_spPr(spPr, raw_xml)
+            return
+
     width = line_meta.get("width", 0)
     color = line_meta.get("color")
 
@@ -1303,10 +1389,10 @@ def _apply_body_props(shape, body_props):
         if bodyPr is None:
             return
 
-        # Apply wrap attribute
-        wrap = body_props.get('wrap')
-        if wrap is not None:
-            bodyPr.set('wrap', wrap)
+        for attr in ('wrap', 'vert', 'anchor', 'rtlCol'):
+            val = body_props.get(attr)
+            if val is not None:
+                bodyPr.set(attr, str(val))
 
         # Apply inset attributes (margins)
         for attr in ('lIns', 'rIns', 'tIns', 'bIns'):
