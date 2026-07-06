@@ -4,6 +4,7 @@ from lxml import etree
 
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 
 def _safe_color(color_obj):
@@ -374,6 +375,26 @@ def _get_body_props(shape):
         return None
 
 
+def _get_raw_relationships(shape, image_filename_map=None, shape_path=None):
+    """Map relationship ids used in raw shape XML to extracted asset filenames."""
+    if not image_filename_map or shape_path is None:
+        return None
+
+    rels = {}
+    for blip in shape.element.findall(".//{{{}}}blip".format(A_NS)):
+        rid = blip.get("{{{}}}embed".format(R_NS)) or blip.get("{{{}}}link".format(R_NS))
+        if not rid:
+            continue
+        filename = image_filename_map.get((tuple(shape_path), "rId", rid))
+        if filename:
+            rels[rid] = {
+                "type": "image",
+                "filename": filename,
+            }
+
+    return rels or None
+
+
 def _get_group_info(shape, theme_color_map=None, image_filename_map=None, shape_path=None):
     """Extract group shape info including children and coordinate space."""
     try:
@@ -436,6 +457,9 @@ def extract_shape_metadata(shape, theme_color_map=None, image_filename_map=None,
         },
         "rotation": shape.rotation or 0,
     }
+    raw_relationships = _get_raw_relationships(shape, image_filename_map, shape_path)
+    if raw_relationships:
+        meta["raw_relationships"] = raw_relationships
 
     # Handle GROUP shapes (MSO_SHAPE_TYPE.GROUP = 6)
     if shape.shape_type == 6:

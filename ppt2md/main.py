@@ -144,6 +144,8 @@ def convert_pptx_to_markdown(input_path, output_dir=None, include_notes=False,
                 key = (img_info["shape_index"],)
             img_filename_map[key] = img_info["filename"]
             img_filename_map[(key, img_info.get("kind", "picture"))] = img_info["filename"]
+            if img_info.get("rId"):
+                img_filename_map[(key, "rId", img_info["rId"])] = img_info["filename"]
 
         shape_metadata = []
         for idx, shape in enumerate(shapes_in_z_order):

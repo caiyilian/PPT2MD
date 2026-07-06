@@ -153,6 +153,9 @@ def _add_shape_from_metadata(slide, meta, images_dir):
     type_name = parsed[0] if parsed else ""
     type_val = parsed[1] if parsed else 0
 
+    if _add_raw_shape_xml(slide, meta.get("raw_xml"), meta.get("raw_relationships"), images_dir):
+        return
+
     x = meta.get("position", {}).get("x", 0)
     y = meta.get("position", {}).get("y", 0)
     w = meta.get("size", {}).get("width", 100000)
@@ -175,8 +178,6 @@ def _add_shape_from_metadata(slide, meta, images_dir):
 
     # Handle lines/arrows (MSO_SHAPE_TYPE.LINE = 9)
     if type_val == 9 or type_name == "LINE":
-        if _add_raw_shape_xml(slide, meta.get("raw_xml")):
-            return
         _add_line_shape(slide, meta, x, y, w, h, rotation)
         return
 
@@ -263,16 +264,49 @@ def _add_group_shape(slide, meta, images_dir, x, y, w, h):
         pass
 
 
-def _add_raw_shape_xml(slide, raw_xml):
+def _add_raw_shape_xml(slide, raw_xml, raw_relationships=None, images_dir=None):
     """Append raw shape XML when it has no external relationships to remap."""
     if not raw_xml:
         return False
     try:
         el = etree.fromstring(raw_xml.encode("utf-8"))
+        if not _remap_raw_relationships(slide, el, raw_relationships or {}, images_dir):
+            return False
         slide.shapes._spTree.append(el)
         return True
     except Exception:
         return False
+
+
+def _remap_raw_relationships(slide, el, raw_relationships, images_dir):
+    """Recreate and replace rIds referenced by raw shape XML."""
+    rel_attrs = [
+        "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed",
+        "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}link",
+    ]
+    referenced = []
+    for node in el.iter():
+        for attr in rel_attrs:
+            rid = node.get(attr)
+            if rid:
+                referenced.append((node, attr, rid))
+
+    if not referenced:
+        return True
+    if not images_dir:
+        return False
+
+    for node, attr, old_rid in referenced:
+        rel = raw_relationships.get(old_rid)
+        if not rel or rel.get("type") != "image":
+            return False
+        img_path = Path(images_dir) / rel.get("filename", "")
+        if not img_path.exists():
+            return False
+        _, new_rid = slide.part.get_or_add_image_part(str(img_path))
+        node.set(attr, new_rid)
+
+    return True
 
 
 def _group_child_bounds_to_slide(child_meta, group_x, group_y, group_w, group_h, coord_space):

@@ -86,6 +86,7 @@ def test_image_extraction(tmp_path):
     images = extract_images_from_slide(prs2.slides[0], output_dir, 1)
     assert len(images) == 1
     assert images[0]["content_type"] == "image/png"
+    assert images[0]["rId"]
 
 
 def test_convert_allows_custom_output_file(tmp_path):
@@ -103,6 +104,7 @@ def test_convert_allows_custom_output_file(tmp_path):
     assert result["success"] is True
     assert result["output_file"] == str(out_dir / "output.md")
     assert (out_dir / "output.md").exists()
+    assert "PPTX_SOURCE_START" not in (out_dir / "output.md").read_text(encoding="utf-8")
 
 
 def test_reverse_compatibility_function_name(tmp_path):
@@ -123,4 +125,3 @@ def test_reverse_compatibility_function_name(tmp_path):
 
     assert result == pptx
     assert pptx.exists()
-

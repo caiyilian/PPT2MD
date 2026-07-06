@@ -50,7 +50,7 @@ def extract_images_from_slide(slide, output_dir, slide_index, seen_rids=None):
     images = []
     img_count = [0]
 
-    def save_blob(blob, content_type, path, kind):
+    def save_blob(blob, content_type, path, kind, r_id=None):
         image_key = hashlib.sha1(blob).hexdigest()
         if image_key in seen_rids:
             filename = seen_rids[image_key]
@@ -61,6 +61,7 @@ def extract_images_from_slide(slide, output_dir, slide_index, seen_rids=None):
                 "shape_index": path[0],
                 "shape_path": list(path),
                 "kind": kind,
+                "rId": r_id,
                 "deduplicated": True,
             })
             return
@@ -81,6 +82,7 @@ def extract_images_from_slide(slide, output_dir, slide_index, seen_rids=None):
             "shape_index": path[0],
             "shape_path": list(path),
             "kind": kind,
+            "rId": r_id,
             "deduplicated": False,
         })
 
@@ -102,11 +104,13 @@ def extract_images_from_slide(slide, output_dir, slide_index, seen_rids=None):
                         part = shape.part.related_part(rid)
                     except KeyError:
                         continue
-                    save_blob(part.blob, part.content_type, current_path, "fill")
+                    save_blob(part.blob, part.content_type, current_path, "fill", rid)
                 continue
 
             image = shape.image
-            save_blob(image.blob, image.content_type, current_path, "picture")
+            blips = shape.element.findall(".//{{{}}}blip".format(A_NS))
+            rid = blips[0].get("{{{}}}embed".format(R_NS)) if blips else None
+            save_blob(image.blob, image.content_type, current_path, "picture", rid)
 
     walk_shapes(slide.shapes)
     return images
