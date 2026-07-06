@@ -75,3 +75,19 @@ def test_format_paragraph_runs_mixed(tmp_path):
     prs2 = Presentation(str(pptx))
     result = format_paragraph_runs(prs2.slides[0].shapes.title.text_frame.paragraphs[0])
     assert "**Bold **Normal" == result
+
+
+def test_format_paragraph_runs_xml_strikethrough(tmp_path):
+    pptx = tmp_path / "test.pptx"
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[0])
+    title = slide.shapes.title
+    title.text = ""
+    run = title.text_frame.paragraphs[0].add_run()
+    run.text = "Deleted"
+    run._r.get_or_add_rPr().set("strike", "sngStrike")
+    prs.save(str(pptx))
+
+    prs2 = Presentation(str(pptx))
+    result = format_paragraph_runs(prs2.slides[0].shapes.title.text_frame.paragraphs[0])
+    assert result == "~~Deleted~~"

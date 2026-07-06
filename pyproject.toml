@@ -25,6 +25,7 @@ windows = [
 
 [project.scripts]
 ppt2md = "ppt2md.main:main"
+ppt2html = "ppt2md.converter.html:main"
 
 [tool.setuptools.packages.find]
 include = ["ppt2md*"]

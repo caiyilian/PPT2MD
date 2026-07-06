@@ -822,6 +822,8 @@ def _apply_text_xml(el, text_meta):
                 rPr.set('i', '1')
             if run_meta.get("underline"):
                 rPr.set('u', '1')
+            if run_meta.get("strikethrough"):
+                rPr.set('strike', 'sngStrike')
             if run_meta.get("superscript"):
                 rPr.set('baseline', '30000')
             if run_meta.get("subscript"):
@@ -1553,6 +1555,12 @@ def _apply_text(shape, text_meta):
                 run.font.italic = True
             if run_meta.get("underline"):
                 run.font.underline = True
+            if run_meta.get("strikethrough"):
+                rPr = run._r.find('{%s}rPr' % A_NS)
+                if rPr is None:
+                    rPr = etree.Element('{%s}rPr' % A_NS)
+                    run._r.insert(0, rPr)
+                rPr.set('strike', 'sngStrike')
             # Superscript/subscript via baseline
             if run_meta.get("superscript"):
                 rPr = run._r.find('{%s}rPr' % A_NS)

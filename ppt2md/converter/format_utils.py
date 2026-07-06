@@ -18,6 +18,22 @@ def _get_baseline(run):
     return 0
 
 
+def _get_strikethrough(run):
+    """Return True when a run has DrawingML strike formatting."""
+    try:
+        rPr = run._r.find("{{{}}}rPr".format(A_NS))
+        if rPr is not None:
+            strike = rPr.get("strike")
+            if strike and strike != "noStrike":
+                return True
+    except Exception:
+        pass
+    try:
+        return bool(getattr(run.font, "strikethrough", False))
+    except Exception:
+        return False
+
+
 def apply_inline_formatting(text, bold=False, italic=False, underline=False,
                              strikethrough=False, superscript=False, subscript=False):
     """Apply Markdown inline formatting to text."""
@@ -51,7 +67,7 @@ def format_paragraph_runs(paragraph):
         bold = run.font.bold
         italic = run.font.italic
         underline = run.font.underline
-        strikethrough = getattr(run.font, "strikethrough", None)
+        strikethrough = _get_strikethrough(run)
 
         baseline = _get_baseline(run)
         superscript = baseline > 0
@@ -62,7 +78,7 @@ def format_paragraph_runs(paragraph):
             bold=bool(bold) if bold is not None else False,
             italic=bool(italic) if italic is not None else False,
             underline=bool(underline) if underline is not None else False,
-            strikethrough=bool(strikethrough) if strikethrough is not None else False,
+            strikethrough=strikethrough,
             superscript=superscript,
             subscript=subscript,
         )

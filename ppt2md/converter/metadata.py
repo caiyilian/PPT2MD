@@ -274,15 +274,13 @@ def _get_text_info(shape):
                 if font.underline:
                     run_info["underline"] = True
             except: pass
-            try:
-                if getattr(font, 'strikethrough', None):
-                    run_info["strikethrough"] = True
-            except: pass
-
             # Superscript/subscript via baseline
             try:
                 rPr = run._r.find("{{{}}}rPr".format(A_NS))
                 if rPr is not None:
+                    strike = rPr.get("strike")
+                    if strike and strike != "noStrike":
+                        run_info["strikethrough"] = True
                     baseline = rPr.get("baseline")
                     if baseline:
                         val = int(baseline)
