@@ -27,6 +27,8 @@ Thumbs.db
 scratch/
 PPT/
 *.pptx
+!ori.pptx
+compare_output/
 
 # Output (generated, not committed)
 output/
