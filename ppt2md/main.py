@@ -39,7 +39,7 @@ def convert_pptx_to_markdown(input_path, output_dir=None, include_notes=False,
                               include_hidden=False, skip_empty=False,
                               formula_as_image=False, keep_original_format=False,
                               image_dpi=96, no_frontmatter=False,
-                              verbose=False, debug=False):
+                              output_file=None, verbose=False, debug=False):
     """Convert a single PPTX file to Markdown.
 
     Returns:
@@ -109,7 +109,8 @@ def convert_pptx_to_markdown(input_path, output_dir=None, include_notes=False,
 
         md_parts.append("\n---\n\n## Slide {}".format(slide_num))
 
-        sorted_shapes = sort_shapes_by_position(list(slide.shapes))
+        shapes_in_z_order = list(slide.shapes)
+        sorted_shapes = sort_shapes_by_position(shapes_in_z_order)
 
         # Build theme color map for resolving scheme colors to absolute values
         theme_color_map = None
@@ -136,18 +137,22 @@ def convert_pptx_to_markdown(input_path, output_dir=None, include_notes=False,
         all_images = extract_imgs(slide, str(images_dir), slide_num, seen_rids)
         img_filename_map = {}
         for img_info in all_images:
-            img_filename_map[img_info["shape_index"]] = img_info["filename"]
+            shape_path = img_info.get("shape_path")
+            if shape_path is not None:
+                key = tuple(shape_path)
+            else:
+                key = (img_info["shape_index"],)
+            img_filename_map[key] = img_info["filename"]
+            img_filename_map[(key, img_info.get("kind", "picture"))] = img_info["filename"]
+            if img_info.get("rId"):
+                img_filename_map[(key, "rId", img_info["rId"])] = img_info["filename"]
 
         shape_metadata = []
-        for shape in sorted_shapes:
-            meta = extract_shape_metadata(shape, theme_color_map)
-            # Inject image filename into metadata for correct roundtrip
-            if hasattr(shape, "image") and shape.image is not None:
-                idx = list(slide.shapes).index(shape)
-                if idx in img_filename_map and "image" in meta:
-                    meta["image"]["filename"] = img_filename_map[idx]
+        for idx, shape in enumerate(shapes_in_z_order):
+            meta = extract_shape_metadata(shape, theme_color_map, img_filename_map, (idx,))
             shape_metadata.append(meta)
 
+        for shape in sorted_shapes:
             shape_md = _process_shape(shape, slide, slide_num, images_dir, media_dir,
                                        seen_rids, formula_as_image, keep_original_format,
                                        verbose, errors)
@@ -197,10 +202,15 @@ def convert_pptx_to_markdown(input_path, output_dir=None, include_notes=False,
             if notes_md:
                 md_parts.append("\n\n{}".format(notes_md))
 
-    output_file = output_dir / "{}.md".format(input_path.stem)
+    output_filename = output_file or "{}.md".format(input_path.stem)
+    output_path = Path(output_filename)
+    if output_path.is_absolute():
+        output_file = output_path
+    else:
+        output_file = output_dir / output_path
     markdown_content = "\n".join(md_parts) + "\n"
 
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(output_file.parent, exist_ok=True)
     with open(output_file, "w", encoding="utf-8") as f:
         f.write(markdown_content)
 
@@ -310,6 +320,10 @@ def main(argv=None):
         help="Output directory (default: same as input file)",
     )
     parser.add_argument(
+        "--output-file",
+        help="Output Markdown filename or path (default: <input-stem>.md)",
+    )
+    parser.add_argument(
         "--include-notes",
         action="store_true",
         help="Include speaker notes in output",
@@ -379,6 +393,7 @@ def main(argv=None):
             keep_original_format=args.keep_original_format,
             image_dpi=args.image_dpi,
             no_frontmatter=args.no_frontmatter,
+            output_file=args.output_file,
             verbose=args.verbose,
             debug=args.debug,
         )
@@ -401,6 +416,7 @@ def main(argv=None):
             keep_original_format=args.keep_original_format,
             image_dpi=args.image_dpi,
             no_frontmatter=args.no_frontmatter,
+            output_file=args.output_file,
             verbose=args.verbose,
             debug=args.debug,
         )

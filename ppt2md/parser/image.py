@@ -1,6 +1,7 @@
 """Image extraction from PPTX slides."""
 
 import os
+import hashlib
 
 
 CONTENT_TYPE_TO_EXT = {
@@ -12,6 +13,10 @@ CONTENT_TYPE_TO_EXT = {
     "image/x-emf": ".emf",
     "image/x-wmf": ".wmf",
 }
+
+A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 
 def get_image_extension(content_type):
@@ -43,41 +48,69 @@ def extract_images_from_slide(slide, output_dir, slide_index, seen_rids=None):
 
     os.makedirs(output_dir, exist_ok=True)
     images = []
-    img_count = 0
+    img_count = [0]
 
-    for shape in slide.shapes:
-        if not hasattr(shape, "image") or shape.image is None:
-            continue
-
-        image = shape.image
-        rId = shape.shape_id
-
-        if rId in seen_rids:
+    def save_blob(blob, content_type, path, kind, r_id=None):
+        image_key = hashlib.sha1(blob).hexdigest()
+        if image_key in seen_rids:
+            filename = seen_rids[image_key]
             images.append({
-                "filename": seen_rids[rId],
-                "path": os.path.join(output_dir, seen_rids[rId]),
-                "content_type": image.content_type,
-                "shape_index": slide.shapes.index(shape),
+                "filename": filename,
+                "path": os.path.join(output_dir, filename),
+                "content_type": content_type,
+                "shape_index": path[0],
+                "shape_path": list(path),
+                "kind": kind,
+                "rId": r_id,
                 "deduplicated": True,
             })
-            continue
+            return
 
-        img_count += 1
-        content_type = image.content_type
+        img_count[0] += 1
         ext = get_image_extension(content_type)
-        filename = "slide_{:02d}_img_{:02d}{}".format(slide_index, img_count, ext)
+        filename = "slide_{:02d}_img_{:02d}{}".format(slide_index, img_count[0], ext)
         filepath = os.path.join(output_dir, filename)
 
         with open(filepath, "wb") as f:
-            f.write(image.blob)
+            f.write(blob)
 
-        seen_rids[rId] = filename
+        seen_rids[image_key] = filename
         images.append({
             "filename": filename,
             "path": filepath,
             "content_type": content_type,
-            "shape_index": slide.shapes.index(shape),
+            "shape_index": path[0],
+            "shape_path": list(path),
+            "kind": kind,
+            "rId": r_id,
             "deduplicated": False,
         })
 
+    def walk_shapes(shapes, path=()):
+        for idx, shape in enumerate(shapes):
+            current_path = path + (idx,)
+            if hasattr(shape, "shapes"):
+                walk_shapes(shape.shapes, current_path)
+
+            if not hasattr(shape, "image") or shape.image is None:
+                blips = shape.element.findall(
+                    ".//{{{}}}spPr/{{{}}}blipFill/{{{}}}blip".format(P_NS, A_NS, A_NS)
+                )
+                for blip in blips:
+                    rid = blip.get("{{{}}}embed".format(R_NS))
+                    if not rid:
+                        continue
+                    try:
+                        part = shape.part.related_part(rid)
+                    except KeyError:
+                        continue
+                    save_blob(part.blob, part.content_type, current_path, "fill", rid)
+                continue
+
+            image = shape.image
+            blips = shape.element.findall(".//{{{}}}blip".format(A_NS))
+            rid = blips[0].get("{{{}}}embed".format(R_NS)) if blips else None
+            save_blob(image.blob, image.content_type, current_path, "picture", rid)
+
+    walk_shapes(slide.shapes)
     return images

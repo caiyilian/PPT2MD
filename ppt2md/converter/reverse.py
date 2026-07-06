@@ -138,11 +138,23 @@ def md_to_pptx(md_path, images_dir=None, output_path=None):
     return output_path
 
 
+def convert_md_to_pptx(md_path, output_path=None, images_dir=None):
+    """Compatibility wrapper for MD to PPTX roundtrip conversion.
+
+    The public issue workflow and compare_roundtrip.py use this function name,
+    while the original implementation exposed md_to_pptx().
+    """
+    return md_to_pptx(md_path, images_dir=images_dir, output_path=output_path)
+
+
 def _add_shape_from_metadata(slide, meta, images_dir):
     """Add a shape to a slide based on metadata."""
     parsed = _parse_shape_type_str(meta.get("type", ""))
     type_name = parsed[0] if parsed else ""
     type_val = parsed[1] if parsed else 0
+
+    if _add_raw_shape_xml(slide, meta.get("raw_xml"), meta.get("raw_relationships"), images_dir):
+        return
 
     x = meta.get("position", {}).get("x", 0)
     y = meta.get("position", {}).get("y", 0)
@@ -171,7 +183,7 @@ def _add_shape_from_metadata(slide, meta, images_dir):
 
     # Handle groups (MSO_SHAPE_TYPE.GROUP = 6)
     if type_val == 6 or type_name == "GROUP":
-        _add_group_shape(slide, meta, x, y, w, h)
+        _add_group_shape(slide, meta, images_dir, x, y, w, h)
         return
 
     # Handle formula shapes (AlternateContent with OMML)
@@ -181,14 +193,14 @@ def _add_shape_from_metadata(slide, meta, images_dir):
 
     # Handle text boxes (MSO_SHAPE_TYPE.TEXT_BOX = 17)
     if type_val == 17 or type_name == "TEXT_BOX":
-        _add_text_box_shape(slide, meta, x, y, w, h, rotation)
+        _add_text_box_shape(slide, meta, images_dir, x, y, w, h, rotation)
         return
 
     # Handle auto shapes and everything else
-    _add_auto_shape(slide, meta, x, y, w, h, rotation)
+    _add_auto_shape(slide, meta, images_dir, x, y, w, h, rotation)
 
 
-def _add_group_shape(slide, meta, x, y, w, h):
+def _add_group_shape(slide, meta, images_dir, x, y, w, h):
     """Add a group shape with children."""
     try:
         P_NS = 'http://schemas.openxmlformats.org/presentationml/2006/main'
@@ -245,11 +257,78 @@ def _add_group_shape(slide, meta, x, y, w, h):
 
         # Add each child shape
         for idx, child_meta in enumerate(group_info["children"]):
-            _build_group_child(grpSp, child_meta, next_id)
+            _build_group_child(grpSp, child_meta, next_id, slide, images_dir)
             next_id += 1
 
     except Exception:
         pass
+
+
+def _add_raw_shape_xml(slide, raw_xml, raw_relationships=None, images_dir=None):
+    """Append raw shape XML when it has no external relationships to remap."""
+    if not raw_xml:
+        return False
+    try:
+        el = etree.fromstring(raw_xml.encode("utf-8"))
+        if not _remap_raw_relationships(slide, el, raw_relationships or {}, images_dir):
+            return False
+        slide.shapes._spTree.append(el)
+        return True
+    except Exception:
+        return False
+
+
+def _remap_raw_relationships(slide, el, raw_relationships, images_dir):
+    """Recreate and replace rIds referenced by raw shape XML."""
+    rel_attrs = [
+        "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed",
+        "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}link",
+    ]
+    referenced = []
+    for node in el.iter():
+        for attr in rel_attrs:
+            rid = node.get(attr)
+            if rid:
+                referenced.append((node, attr, rid))
+
+    if not referenced:
+        return True
+    if not images_dir:
+        return False
+
+    for node, attr, old_rid in referenced:
+        rel = raw_relationships.get(old_rid)
+        if not rel or rel.get("type") != "image":
+            return False
+        img_path = Path(images_dir) / rel.get("filename", "")
+        if not img_path.exists():
+            return False
+        _, new_rid = slide.part.get_or_add_image_part(str(img_path))
+        node.set(attr, new_rid)
+
+    return True
+
+
+def _group_child_bounds_to_slide(child_meta, group_x, group_y, group_w, group_h, coord_space):
+    """Map a group child bounding box from group coordinates to slide coordinates."""
+    child_x = child_meta.get("position", {}).get("x", 0)
+    child_y = child_meta.get("position", {}).get("y", 0)
+    child_w = child_meta.get("size", {}).get("width", 100000)
+    child_h = child_meta.get("size", {}).get("height", 100000)
+
+    ch_off_x = coord_space.get("chOffX", group_x)
+    ch_off_y = coord_space.get("chOffY", group_y)
+    ch_ext_w = coord_space.get("chExtCX", group_w) or group_w or 1
+    ch_ext_h = coord_space.get("chExtCY", group_h) or group_h or 1
+    scale_x = float(group_w) / float(ch_ext_w)
+    scale_y = float(group_h) / float(ch_ext_h)
+
+    return (
+        int(group_x + (child_x - ch_off_x) * scale_x),
+        int(group_y + (child_y - ch_off_y) * scale_y),
+        int(child_w * scale_x),
+        int(child_h * scale_y),
+    )
 
 
 def _add_formula_shape(slide, meta, x, y, w, h, rotation):
@@ -269,7 +348,7 @@ def _add_formula_shape(slide, meta, x, y, w, h, rotation):
 
     if not omml_xml_list:
         # Fallback: create regular text box with LaTeX text
-        _add_text_box_shape(slide, meta, x, y, w, h, rotation)
+        _add_text_box_shape(slide, meta, None, x, y, w, h, rotation)
         return
 
     try:
@@ -313,36 +392,75 @@ def _add_formula_shape(slide, meta, x, y, w, h, rotation):
 
         choice_sp = etree.fromstring(choice_sp_xml.encode())
 
-        # Add regular text runs from metadata (before OMML elements)
+        # Add elements in original order (text runs interleaved with OMML formulas)
         p_el = choice_sp.find('.//{%s}p' % A_NS)
         text_meta = meta.get('text', {})
-        for para in text_meta.get('paragraphs', []):
-            for run_meta in para.get('runs', []):
-                text = run_meta.get('text', '')
-                # Skip formula text (starts with $) - it's handled by OMML
-                if text.startswith('$') and text.endswith('$'):
-                    continue
-                if not text:
-                    continue
-                # Add as a regular a:r element
-                r = etree.SubElement(p_el, qn('a:r'))
-                rPr = etree.SubElement(r, qn('a:rPr'))
-                if run_meta.get('font_size'):
-                    rPr.set('sz', str(int(run_meta['font_size'] * 100 / 12700)))
-                if run_meta.get('bold'):
-                    rPr.set('b', '1')
-                if run_meta.get('superscript'):
-                    rPr.set('baseline', '30000')
-                if run_meta.get('subscript'):
-                    rPr.set('baseline', '-25000')
-                t = etree.SubElement(r, qn('a:t'))
-                t.text = text
+        omml_inserted = [False]  # track if we've already injected OMML
 
-        # Inject OMML XML into the a:p element (after regular text)
-        for omml_xml in omml_xml_list:
-            omml_el = etree.fromstring(omml_xml.encode())
-            if p_el is not None:
-                p_el.append(omml_el)
+        for para in text_meta.get('paragraphs', []):
+            ordered = para.get('_ordered_elements', None)
+            runs = para.get('runs', [])
+
+            if ordered:
+                # Use ordered elements to interleave text and OMML correctly
+                for elem in ordered:
+                    if elem["type"] == "text":
+                        run_meta = runs[elem["idx"]]
+                        text = run_meta.get('text', '')
+                        # Skip formula text (starts with $) - it's handled by OMML
+                        if text.startswith('$') and text.endswith('$'):
+                            continue
+                        if not text:
+                            continue
+                        r = etree.SubElement(p_el, qn('a:r'))
+                        rPr = etree.SubElement(r, qn('a:rPr'))
+                        if run_meta.get('font_size'):
+                            rPr.set('sz', str(int(run_meta['font_size'] * 100 / 12700)))
+                        if run_meta.get('bold'):
+                            rPr.set('b', '1')
+                        if run_meta.get('superscript'):
+                            rPr.set('baseline', '30000')
+                        if run_meta.get('subscript'):
+                            rPr.set('baseline', '-25000')
+                        t = etree.SubElement(r, qn('a:t'))
+                        t.text = text
+                    elif elem["type"] == "omml" and not omml_inserted[0]:
+                        # Inject OMML XML at correct position
+                        for omml_xml in omml_xml_list:
+                            omml_el = etree.fromstring(omml_xml.encode())
+                            p_el.append(omml_el)
+                        omml_inserted[0] = True
+                # If OMML not inserted yet (e.g., at end of ordered list), append now
+                if not omml_inserted[0]:
+                    for omml_xml in omml_xml_list:
+                        omml_el = etree.fromstring(omml_xml.encode())
+                        p_el.append(omml_el)
+            else:
+                # Legacy path: no ordering info, text runs first then OMML
+                for run_meta in runs:
+                    text = run_meta.get('text', '')
+                    if text.startswith('$') and text.endswith('$'):
+                        continue
+                    if not text:
+                        continue
+                    r = etree.SubElement(p_el, qn('a:r'))
+                    rPr = etree.SubElement(r, qn('a:rPr'))
+                    if run_meta.get('font_size'):
+                        rPr.set('sz', str(int(run_meta['font_size'] * 100 / 12700)))
+                    if run_meta.get('bold'):
+                        rPr.set('b', '1')
+                    if run_meta.get('superscript'):
+                        rPr.set('baseline', '30000')
+                    if run_meta.get('subscript'):
+                        rPr.set('baseline', '-25000')
+                    t = etree.SubElement(r, qn('a:t'))
+                    t.text = text
+
+                # Inject OMML XML into the a:p element (after regular text)
+                for omml_xml in omml_xml_list:
+                    omml_el = etree.fromstring(omml_xml.encode())
+                    if p_el is not None:
+                        p_el.append(omml_el)
 
         # Fallback XML
         fb_xml = """<p:sp xmlns:p="%s" xmlns:a="%s">
@@ -382,10 +500,10 @@ def _add_formula_shape(slide, meta, x, y, w, h, rotation):
 
     except Exception:
         # Fallback to text box
-        _add_text_box_shape(slide, meta, x, y, w, h, rotation)
+        _add_text_box_shape(slide, meta, None, x, y, w, h, rotation)
 
 
-def _build_group_child(grpSp, meta, idx):
+def _build_group_child(grpSp, meta, idx, slide=None, images_dir=None):
     """Build a child shape element inside a group."""
     P_NS = 'http://schemas.openxmlformats.org/presentationml/2006/main'
     A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
@@ -400,6 +518,14 @@ def _build_group_child(grpSp, meta, idx):
     h = meta.get("size", {}).get("height", 100000)
     rotation = meta.get("rotation", 0)
     name = meta.get("name", "Shape %d" % idx)
+
+    if type_val == 6 or "group" in meta:
+        _build_nested_group(grpSp, meta, idx, slide, images_dir)
+        return
+
+    if type_val == 13 or meta.get("image"):
+        _build_group_picture(grpSp, meta, idx, slide, images_dir)
+        return
 
     if type_val == 9:  # LINE / CONNECTOR
         el = etree.SubElement(grpSp, qn('p:cxnSp'))
@@ -437,8 +563,12 @@ def _build_group_child(grpSp, meta, idx):
             parsed = re.match(r'.*?\((\d+)\)', auto_type_str)
             if parsed:
                 auto_val = int(parsed.group(1))
-                prst_map = {1: 'rect', 5: 'roundRect', 9: 'ellipse', 33: 'rightArrow', 34: 'leftArrow', 78: 'flowChartOr'}
-                prst = prst_map.get(auto_val, 'rect')
+                try:
+                    from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
+                    prst = MSO_AUTO_SHAPE_TYPE(auto_val).xml_value
+                except Exception:
+                    prst_map = {1: 'rect', 5: 'roundRect', 9: 'ellipse', 33: 'rightArrow', 34: 'leftArrow', 77: 'flowChartSummingJunction', 78: 'flowChartOr'}
+                    prst = prst_map.get(auto_val, 'rect')
         geom = etree.SubElement(spPr, qn('a:prstGeom'))
         geom.set('prst', prst)
         etree.SubElement(geom, qn('a:avLst'))
@@ -470,10 +600,104 @@ def _build_group_child(grpSp, meta, idx):
         _apply_body_props_xml(el, body_props)
 
 
+def _build_nested_group(parent, meta, idx, slide=None, images_dir=None):
+    """Build a nested p:grpSp element."""
+    from pptx.oxml.ns import qn
+
+    group_info = meta.get("group") or {}
+    x = meta.get("position", {}).get("x", 0)
+    y = meta.get("position", {}).get("y", 0)
+    w = meta.get("size", {}).get("width", 100000)
+    h = meta.get("size", {}).get("height", 100000)
+
+    grp = etree.SubElement(parent, qn('p:grpSp'))
+    nv = etree.SubElement(grp, qn('p:nvGrpSpPr'))
+    cnvPr = etree.SubElement(nv, qn('p:cNvPr'))
+    cnvPr.set('id', str(idx))
+    cnvPr.set('name', meta.get("name", "Group %d" % idx))
+    etree.SubElement(nv, qn('p:cNvGrpSpPr'))
+    etree.SubElement(nv, qn('p:nvPr'))
+
+    grpSpPr = etree.SubElement(grp, qn('p:grpSpPr'))
+    xfrm = etree.SubElement(grpSpPr, qn('a:xfrm'))
+    off = etree.SubElement(xfrm, qn('a:off'))
+    off.set('x', str(x))
+    off.set('y', str(y))
+    ext = etree.SubElement(xfrm, qn('a:ext'))
+    ext.set('cx', str(w))
+    ext.set('cy', str(h))
+
+    cs = group_info.get("coord_space", {})
+    chOff = etree.SubElement(xfrm, qn('a:chOff'))
+    chOff.set('x', str(cs.get('chOffX', x)))
+    chOff.set('y', str(cs.get('chOffY', y)))
+    chExt = etree.SubElement(xfrm, qn('a:chExt'))
+    chExt.set('cx', str(cs.get('chExtCX', w)))
+    chExt.set('cy', str(cs.get('chExtCY', h)))
+
+    next_id = idx * 1000
+    for child in group_info.get("children", []):
+        _build_group_child(grp, child, next_id, slide, images_dir)
+        next_id += 1
+
+
+def _build_group_picture(parent, meta, idx, slide=None, images_dir=None):
+    """Build a p:pic element inside a group."""
+    from pptx.oxml.ns import qn
+
+    image_meta = meta.get("image", {})
+    filename = image_meta.get("filename")
+    if not slide or not images_dir or not filename:
+        return
+
+    img_path = Path(images_dir) / filename
+    if not img_path.exists():
+        return
+
+    _, r_id = slide.part.get_or_add_image_part(str(img_path))
+
+    x = meta.get("position", {}).get("x", 0)
+    y = meta.get("position", {}).get("y", 0)
+    w = meta.get("size", {}).get("width", 100000)
+    h = meta.get("size", {}).get("height", 100000)
+    name = meta.get("name", "Picture %d" % idx)
+
+    pic = etree.SubElement(parent, qn('p:pic'))
+    nv = etree.SubElement(pic, qn('p:nvPicPr'))
+    cnvPr = etree.SubElement(nv, qn('p:cNvPr'))
+    cnvPr.set('id', str(idx))
+    cnvPr.set('name', name)
+    etree.SubElement(nv, qn('p:cNvPicPr'))
+    etree.SubElement(nv, qn('p:nvPr'))
+
+    blipFill = etree.SubElement(pic, qn('p:blipFill'))
+    blip = etree.SubElement(blipFill, qn('a:blip'))
+    blip.set('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed', r_id)
+    stretch = etree.SubElement(blipFill, qn('a:stretch'))
+    etree.SubElement(stretch, qn('a:fillRect'))
+
+    spPr = etree.SubElement(pic, qn('p:spPr'))
+    xfrm = etree.SubElement(spPr, qn('a:xfrm'))
+    off = etree.SubElement(xfrm, qn('a:off'))
+    off.set('x', str(x))
+    off.set('y', str(y))
+    ext = etree.SubElement(xfrm, qn('a:ext'))
+    ext.set('cx', str(w))
+    ext.set('cy', str(h))
+    geom = etree.SubElement(spPr, qn('a:prstGeom'))
+    geom.set('prst', 'rect')
+    etree.SubElement(geom, qn('a:avLst'))
+
+
 def _apply_fill_xml(spPr, fill_meta):
     """Apply fill to an spPr XML element (used for group children)."""
     A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
     from pptx.oxml.ns import qn
+
+    raw_xml = fill_meta.get("xml")
+    if raw_xml:
+        _apply_raw_fill_to_spPr(spPr, raw_xml)
+        return
 
     fill_type = fill_meta.get("type")
     if fill_type == "none":
@@ -515,6 +739,11 @@ def _apply_line_xml(spPr, line_meta):
     """Apply line to an spPr XML element (used for group children)."""
     A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
     from pptx.oxml.ns import qn
+
+    raw_xml = line_meta.get("xml")
+    if raw_xml:
+        _apply_raw_line_to_spPr(spPr, raw_xml)
+        return
 
     width = line_meta.get("width", 0)
     color = line_meta.get("color")
@@ -635,9 +864,10 @@ def _apply_body_props_xml(el, body_props):
     if bodyPr is None:
         return
 
-    wrap = body_props.get('wrap')
-    if wrap is not None:
-        bodyPr.set('wrap', wrap)
+    for attr in ('wrap', 'vert', 'anchor', 'rtlCol'):
+        val = body_props.get(attr)
+        if val is not None:
+            bodyPr.set(attr, str(val))
 
     for attr in ('lIns', 'rIns', 'tIns', 'bIns'):
         val = body_props.get(attr)
@@ -671,7 +901,7 @@ def _parse_type_value(type_str):
     return None
 
 
-def _add_text_box_shape(slide, meta, x, y, w, h, rotation):
+def _add_text_box_shape(slide, meta, images_dir, x, y, w, h, rotation):
     """Add a text box shape (no fill, no line by default)."""
     from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
 
@@ -679,8 +909,12 @@ def _add_text_box_shape(slide, meta, x, y, w, h, rotation):
     shape.rotation = rotation
     _remove_shape_style(shape)
 
-    # Text boxes have no fill and no line by default
-    shape.fill.background()
+    fill_meta = meta.get("fill")
+    if fill_meta:
+        _apply_fill(shape, _with_images_dir(fill_meta, images_dir))
+    else:
+        # Text boxes have no fill by default
+        shape.fill.background()
 
     line_meta = meta.get("line")
     if line_meta:
@@ -701,7 +935,7 @@ def _add_text_box_shape(slide, meta, x, y, w, h, rotation):
         _apply_body_props(shape, body_props)
 
 
-def _add_auto_shape(slide, meta, x, y, w, h, rotation):
+def _add_auto_shape(slide, meta, images_dir, x, y, w, h, rotation):
     """Add an auto shape (rectangle, rounded rect, etc.) with proper fill/line."""
     from pptx.enum.shapes import MSO_AUTO_SHAPE_TYPE
 
@@ -712,15 +946,10 @@ def _add_auto_shape(slide, meta, x, y, w, h, rotation):
         if parsed:
             auto_type_val = int(parsed.group(1))
 
-    auto_shape_map = {
-        1: MSO_AUTO_SHAPE_TYPE.RECTANGLE,
-        5: MSO_AUTO_SHAPE_TYPE.ROUNDED_RECTANGLE,
-        9: MSO_AUTO_SHAPE_TYPE.OVAL,
-        33: MSO_AUTO_SHAPE_TYPE.RIGHT_ARROW,
-        34: MSO_AUTO_SHAPE_TYPE.LEFT_ARROW,
-    }
-
-    auto_type = auto_shape_map.get(auto_type_val, MSO_AUTO_SHAPE_TYPE.RECTANGLE)
+    try:
+        auto_type = MSO_AUTO_SHAPE_TYPE(auto_type_val)
+    except Exception:
+        auto_type = MSO_AUTO_SHAPE_TYPE.RECTANGLE
     try:
         shape = slide.shapes.add_shape(auto_type, x, y, w, h)
     except Exception:
@@ -732,7 +961,7 @@ def _add_auto_shape(slide, meta, x, y, w, h, rotation):
     # Apply fill
     fill_meta = meta.get("fill")
     if fill_meta:
-        _apply_fill(shape, fill_meta)
+        _apply_fill(shape, _with_images_dir(fill_meta, images_dir))
     else:
         # No fill metadata → transparent
         try:
@@ -759,6 +988,51 @@ def _add_auto_shape(slide, meta, x, y, w, h, rotation):
     body_props = meta.get("body_props")
     if body_props:
         _apply_body_props(shape, body_props)
+
+
+def _with_images_dir(fill_meta, images_dir):
+    """Return fill metadata augmented with the image directory for blip fills."""
+    if not fill_meta or images_dir is None:
+        return fill_meta
+    result = dict(fill_meta)
+    result["_images_dir"] = str(images_dir)
+    return result
+
+
+def _apply_raw_fill_to_spPr(spPr, raw_xml):
+    """Replace fill XML under spPr with the original DrawingML fill element."""
+    try:
+        fill_el = etree.fromstring(raw_xml.encode("utf-8"))
+    except Exception:
+        return
+    fill_names = {"solidFill", "noFill", "gradFill", "pattFill", "blipFill"}
+    for child in list(spPr):
+        local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        if local in fill_names:
+            spPr.remove(child)
+
+    insert_at = len(spPr)
+    for idx, child in enumerate(spPr):
+        local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        if local == "ln":
+            insert_at = idx
+            break
+        if local == "prstGeom":
+            insert_at = idx + 1
+    spPr.insert(insert_at, fill_el)
+
+
+def _apply_raw_line_to_spPr(spPr, raw_xml):
+    """Replace line XML under spPr with the original DrawingML line element."""
+    try:
+        line_el = etree.fromstring(raw_xml.encode("utf-8"))
+    except Exception:
+        return
+    for child in list(spPr):
+        local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        if local == "ln":
+            spPr.remove(child)
+    spPr.append(line_el)
 
 
 def _add_image_shape(slide, meta, images_dir, x, y, w, h):
@@ -811,7 +1085,7 @@ def _add_line_shape(slide, meta, x, y, w, h, rotation):
     connector_geom = line_meta.get("connector_geom", "")
 
     conn_type = MSO_CONNECTOR_TYPE.STRAIGHT
-    if connector_geom == "bentConnector2":
+    if connector_geom and connector_geom.startswith("bentConnector"):
         conn_type = MSO_CONNECTOR_TYPE.ELBOW
 
     try:
@@ -885,6 +1159,13 @@ def _apply_fill(shape, fill_meta):
 
     Handles solid (RGB), scheme (theme), and no-fill types.
     """
+    raw_xml = fill_meta.get("xml")
+    if raw_xml:
+        spPr = _get_spPr(shape)
+        if spPr is not None:
+            _apply_raw_fill_to_spPr(spPr, raw_xml)
+            return
+
     fill_type = fill_meta.get("type")
     color = fill_meta.get("color")
 
@@ -916,6 +1197,51 @@ def _apply_fill(shape, fill_meta):
                 pass
         _apply_scheme_fill(shape, color, fill_meta.get("modifiers"))
         return
+
+    if fill_type == "blip":
+        _apply_picture_fill(shape, fill_meta)
+        return
+
+
+def _apply_picture_fill(shape, fill_meta):
+    """Apply an image as a shape fill using DrawingML blipFill."""
+    filename = fill_meta.get("filename")
+    if not filename:
+        return
+
+    image_path = Path(filename)
+    if not image_path.is_absolute():
+        images_dir = fill_meta.get("_images_dir")
+        if not images_dir:
+            return
+        image_path = Path(images_dir) / filename
+    if not image_path.exists():
+        return
+
+    try:
+        _, r_id = shape.part.get_or_add_image_part(str(image_path))
+
+        spPr = _get_spPr(shape)
+        if spPr is None:
+            return
+        for child in list(spPr):
+            local = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+            if local in ("solidFill", "noFill", "gradFill", "pattFill", "blipFill"):
+                spPr.remove(child)
+
+        blip_fill = etree.Element("{{{}}}blipFill".format(A_NS))
+        blip = etree.SubElement(blip_fill, "{{{}}}blip".format(A_NS))
+        blip.set(
+            "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed",
+            r_id,
+        )
+        stretch = etree.SubElement(blip_fill, "{{{}}}stretch".format(A_NS))
+        etree.SubElement(stretch, "{{{}}}fillRect".format(A_NS))
+
+        insert_at = 1 if len(spPr) > 1 else len(spPr)
+        spPr.insert(insert_at, blip_fill)
+    except Exception:
+        pass
 
 
 def _apply_scheme_fill(shape, theme_color, modifiers=None):
@@ -963,6 +1289,13 @@ def _apply_line(shape, line_meta):
     Handles connectors and regular shapes. Creates a:ln XML element
     if needed for arrowhead support.
     """
+    raw_xml = line_meta.get("xml")
+    if raw_xml:
+        spPr = _get_spPr(shape)
+        if spPr is not None:
+            _apply_raw_line_to_spPr(spPr, raw_xml)
+            return
+
     width = line_meta.get("width", 0)
     color = line_meta.get("color")
 
@@ -1129,10 +1462,10 @@ def _apply_body_props(shape, body_props):
         if bodyPr is None:
             return
 
-        # Apply wrap attribute
-        wrap = body_props.get('wrap')
-        if wrap is not None:
-            bodyPr.set('wrap', wrap)
+        for attr in ('wrap', 'vert', 'anchor', 'rtlCol'):
+            val = body_props.get(attr)
+            if val is not None:
+                bodyPr.set(attr, str(val))
 
         # Apply inset attributes (margins)
         for attr in ('lIns', 'rIns', 'tIns', 'bIns'):

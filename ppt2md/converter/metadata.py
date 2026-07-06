@@ -4,6 +4,7 @@ from lxml import etree
 
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
 P_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 
 def _safe_color(color_obj):
@@ -21,7 +22,7 @@ def _safe_color(color_obj):
     return None
 
 
-def _get_fill_info(shape, theme_color_map=None):
+def _get_fill_info(shape, theme_color_map=None, image_filename_map=None, shape_path=None):
     """Extract fill information from shape XML.
 
     Args:
@@ -38,11 +39,19 @@ def _get_fill_info(shape, theme_color_map=None):
     if solid is not None:
         srgb = solid.find("{{{}}}srgbClr".format(A_NS))
         if srgb is not None:
-            return {"type": "solid", "color": srgb.get("val")}
+            return {
+                "type": "solid",
+                "color": srgb.get("val"),
+                "xml": etree.tostring(solid, encoding="unicode"),
+            }
         scheme = solid.find("{{{}}}schemeClr".format(A_NS))
         if scheme is not None:
             scheme_name = scheme.get("val")
-            info = {"type": "scheme", "color": scheme_name}
+            info = {
+                "type": "scheme",
+                "color": scheme_name,
+                "xml": etree.tostring(solid, encoding="unicode"),
+            }
             modifiers = _get_color_modifiers(scheme)
             if modifiers:
                 info["modifiers"] = modifiers
@@ -55,9 +64,25 @@ def _get_fill_info(shape, theme_color_map=None):
                     info["_resolved"] = resolved
             return info
 
+    grad_fill = spPr.find("{{{}}}gradFill".format(A_NS))
+    if grad_fill is not None:
+        return {
+            "type": "gradient",
+            "xml": etree.tostring(grad_fill, encoding="unicode"),
+        }
+
     no_fill = spPr.find("{{{}}}noFill".format(A_NS))
     if no_fill is not None:
-        return {"type": "none"}
+        return {"type": "none", "xml": etree.tostring(no_fill, encoding="unicode")}
+
+    blip_fill = spPr.find("{{{}}}blipFill".format(A_NS))
+    if blip_fill is not None:
+        info = {"type": "blip"}
+        if image_filename_map and shape_path is not None:
+            filename = image_filename_map.get((tuple(shape_path), "fill"))
+            if filename:
+                info["filename"] = filename
+        return info
 
     return None
 
@@ -155,7 +180,10 @@ def _get_line_info(shape):
         return None
 
     width = ln.get("w")
-    info = {"width": int(width) if width else 0}
+    info = {
+        "width": int(width) if width else 0,
+        "xml": etree.tostring(ln, encoding="unicode"),
+    }
 
     solid = ln.find(".//{{{}}}solidFill".format(A_NS))
     if solid is not None:
@@ -312,10 +340,10 @@ def _get_body_props(shape):
             return None
 
         props = {}
-        # wrap attribute
-        wrap = bodyPr.get('wrap')
-        if wrap is not None:
-            props['wrap'] = wrap
+        for attr in ('wrap', 'vert', 'anchor', 'rtlCol'):
+            val = bodyPr.get(attr)
+            if val is not None:
+                props[attr] = val
 
         # inset attributes (margins)
         for attr in ('lIns', 'rIns', 'tIns', 'bIns'):
@@ -347,7 +375,27 @@ def _get_body_props(shape):
         return None
 
 
-def _get_group_info(shape):
+def _get_raw_relationships(shape, image_filename_map=None, shape_path=None):
+    """Map relationship ids used in raw shape XML to extracted asset filenames."""
+    if not image_filename_map or shape_path is None:
+        return None
+
+    rels = {}
+    for blip in shape.element.findall(".//{{{}}}blip".format(A_NS)):
+        rid = blip.get("{{{}}}embed".format(R_NS)) or blip.get("{{{}}}link".format(R_NS))
+        if not rid:
+            continue
+        filename = image_filename_map.get((tuple(shape_path), "rId", rid))
+        if filename:
+            rels[rid] = {
+                "type": "image",
+                "filename": filename,
+            }
+
+    return rels or None
+
+
+def _get_group_info(shape, theme_color_map=None, image_filename_map=None, shape_path=None):
     """Extract group shape info including children and coordinate space."""
     try:
         # Get group coordinate space (chOff/chExt)
@@ -368,8 +416,14 @@ def _get_group_info(shape):
         # Extract children metadata
         children = []
         if hasattr(shape, 'shapes'):
-            for child in shape.shapes:
-                child_meta = extract_shape_metadata(child)
+            for idx, child in enumerate(shape.shapes):
+                child_path = tuple(shape_path + (idx,)) if shape_path is not None else None
+                child_meta = extract_shape_metadata(
+                    child,
+                    theme_color_map,
+                    image_filename_map,
+                    child_path,
+                )
                 children.append(child_meta)
 
         result = {"children": children}
@@ -380,7 +434,7 @@ def _get_group_info(shape):
         return None
 
 
-def extract_shape_metadata(shape, theme_color_map=None):
+def extract_shape_metadata(shape, theme_color_map=None, image_filename_map=None, shape_path=None):
     """Extract comprehensive metadata for a shape.
 
     Args:
@@ -392,6 +446,7 @@ def extract_shape_metadata(shape, theme_color_map=None):
     meta = {
         "name": shape.name,
         "type": str(shape.shape_type),
+        "raw_xml": etree.tostring(shape.element, encoding="unicode"),
         "position": {
             "x": shape.left,
             "y": shape.top,
@@ -402,10 +457,18 @@ def extract_shape_metadata(shape, theme_color_map=None):
         },
         "rotation": shape.rotation or 0,
     }
+    raw_relationships = _get_raw_relationships(shape, image_filename_map, shape_path)
+    if raw_relationships:
+        meta["raw_relationships"] = raw_relationships
 
     # Handle GROUP shapes (MSO_SHAPE_TYPE.GROUP = 6)
     if shape.shape_type == 6:
-        meta["group"] = _get_group_info(shape)
+        meta["group"] = _get_group_info(
+            shape,
+            theme_color_map,
+            image_filename_map,
+            tuple(shape_path) if shape_path is not None else None,
+        )
         return meta
 
     # Auto shape type
@@ -423,7 +486,7 @@ def extract_shape_metadata(shape, theme_color_map=None):
         }
 
     # Fill
-    fill_info = _get_fill_info(shape, theme_color_map)
+    fill_info = _get_fill_info(shape, theme_color_map, image_filename_map, shape_path)
     if fill_info:
         meta["fill"] = fill_info
 
@@ -448,6 +511,10 @@ def extract_shape_metadata(shape, theme_color_map=None):
             "content_type": shape.image.content_type,
             "blob_size": len(shape.image.blob),
         }
+        if image_filename_map and shape_path is not None:
+            filename = image_filename_map.get(tuple(shape_path))
+            if filename:
+                meta["image"]["filename"] = filename
 
     # Table
     if hasattr(shape, "has_table") and shape.has_table:
@@ -569,13 +636,6 @@ def extract_alternate_content_shapes(slide):
 
             formula_text = ' '.join(latex_parts) if latex_parts else ''
 
-            # Also extract any regular text from the shape
-            text_parts = []
-            if txBody is not None:
-                for t_el in txBody.iter('{%s}t' % A_NS):
-                    if t_el.text:
-                        text_parts.append(t_el.text)
-
             meta = {
                 "name": shape_name,
                 "type": "AUTO_SHAPE (1)",
@@ -591,19 +651,47 @@ def extract_alternate_content_shapes(slide):
             }
 
             # Build text content: combine regular text with formula
+            # Preserve original element order for correct rendering
             para_info = {"level": 0, "alignment": None, "runs": []}
+            ordered_elements = []  # tracks original order: {"type": "text", "idx": N} or {"type": "omml", "idx": N}
 
-            if text_parts:
-                run_info = {"text": ''.join(text_parts)}
-                para_info["runs"].append(run_info)
+            if txBody is not None:
+                ap = txBody.find('{%s}p' % A_NS)
+                if ap is not None:
+                    for child in ap:
+                        local = child.tag.split('}')[1] if '}' in child.tag else child.tag
+                        if local == 'r':
+                            t_el = child.find('{%s}t' % A_NS)
+                            if t_el is not None and t_el.text:
+                                rPr = child.find('{%s}rPr' % A_NS)
+                                run_info = {"text": t_el.text}
+                                if rPr is not None:
+                                    baseline = rPr.get("baseline")
+                                    if baseline:
+                                        val = int(baseline)
+                                        run_info["superscript"] = val > 0
+                                        run_info["subscript"] = val < 0
+                                para_info["runs"].append(run_info)
+                                ordered_elements.append({"type": "text", "idx": len(para_info["runs"]) - 1})
+                        elif local == 'm' or local == 'f' or (local == 's' and child.tag.endswith('}m')):
+                            # OMML element (a14:m wraps m:oMath)
+                            ordered_elements.append({"type": "omml", "idx": -1})
+                        elif local == 'endParaRPr':
+                            pass
 
             if formula_text:
-                # Placeholder text that indicates a formula
                 formula_display = "$%s$" % formula_text
                 run_info_f = {"text": formula_display}
-                para_info["runs"].append(run_info_f)
+                # Only add formula run if not already in runs (dedup)
+                has_formula_in_runs = any(
+                    r.get("text", "").startswith("$") for r in para_info["runs"]
+                )
+                if not has_formula_in_runs:
+                    para_info["runs"].append(run_info_f)
+                    ordered_elements.append({"type": "text", "idx": len(para_info["runs"]) - 1})
 
             if para_info["runs"]:
+                para_info["_ordered_elements"] = ordered_elements
                 meta["text"]["paragraphs"].append(para_info)
 
             shapes_meta.append(meta)
