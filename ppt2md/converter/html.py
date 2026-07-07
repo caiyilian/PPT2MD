@@ -1113,6 +1113,38 @@ def _transparent_pixel():
     )
 
 
+def screenshot_html(html_path, output_png=None):
+    """Render a local HTML file to a PNG screenshot using Playwright.
+
+    Args:
+        html_path: Path to the HTML file.
+        output_png: Output PNG path (default: html_path with .png suffix).
+
+    Returns:
+        Path to the generated PNG file.
+    """
+    html_path = Path(html_path)
+    if output_png is None:
+        output_png = html_path.with_suffix(".png")
+    output_png = Path(output_png)
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("  [WARN] playwright not installed. Run: pip install playwright && python -m playwright install chromium")
+        return None
+
+    file_url = "file:///" + str(html_path.resolve()).replace("\\", "/")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        page.goto(file_url, wait_until="networkidle")
+        page.screenshot(path=str(output_png.resolve()), full_page=True)
+        browser.close()
+
+    return output_png
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="ppt2html.py",
@@ -1120,6 +1152,8 @@ def main(argv=None):
     )
     parser.add_argument("input", help="Path to the input .pptx file")
     parser.add_argument("-o", "--output", help="Output HTML file path")
+    parser.add_argument("--screenshot", action="store_true",
+                        help="Also take a Playwright screenshot of the generated HTML for visual comparison")
     args = parser.parse_args(argv)
 
     input_path = Path(args.input)
@@ -1128,6 +1162,12 @@ def main(argv=None):
 
     output_path = convert_pptx_to_html(input_path, args.output)
     print("ppt2html: {} -> {}".format(input_path, output_path))
+
+    if args.screenshot:
+        screenshot_path = output_path.with_suffix(".png")
+        screenshot_html(str(output_path), str(screenshot_path))
+        print("ppt2html: screenshot -> {}".format(screenshot_path))
+
     return 0
 
 
