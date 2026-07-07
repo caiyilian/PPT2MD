@@ -2,7 +2,6 @@
 
 import argparse
 import base64
-import copy
 import mimetypes
 from html import escape
 from pathlib import Path
@@ -335,7 +334,7 @@ def _render_group(meta, ctx, z_index):
 
     rendered = []
     for child_index, child in enumerate(children, 1):
-        child_meta = copy.deepcopy(child)
+        child_meta = dict(child)
         x, y, w, h = _group_child_bounds_to_slide(
             child_meta, group_x, group_y, group_w, group_h, coord_space
         )
@@ -623,8 +622,14 @@ def _render_text(meta, ctx):
         "bottom:{:.3f}px".format(inset_bottom),
         "justify-content:{}".format(justify),
     ]
-    if body_props.get("vert"):
-        extra.extend(["writing-mode:vertical-rl", "text-orientation:mixed"])
+    vert = body_props.get("vert")
+    if vert and vert != "horz":
+        if vert == "vert270":
+            extra.extend(["transform:rotate(-90deg)", "transform-origin:center center"])
+        elif vert == "vert90":
+            extra.extend(["transform:rotate(90deg)", "transform-origin:center center"])
+        else:
+            extra.extend(["writing-mode:vertical-rl", "text-orientation:mixed"])
 
     lines = []
     for para in paragraphs:
@@ -751,7 +756,7 @@ def _extract_theme_color_map(prs):
                 name = _local_name(child)
                 value = None
                 for color_child in child:
-                    value = color_child.get("val") or color_child.get("lastClr")
+                    value = color_child.get("lastClr") or color_child.get("val")
                     if value:
                         break
                 if value:
@@ -836,8 +841,10 @@ def _svg_fill(fill_meta, ctx):
 
 def _stroke_info(line_meta, theme_color_map):
     raw_color = line_meta.get("color")
-    if raw_color is None and line_meta.get("xml"):
-        raw_color = _first_color_from_xml(line_meta["xml"], theme_color_map)
+    if line_meta.get("xml"):
+        xml_color = _first_color_from_xml(line_meta["xml"], theme_color_map)
+        if xml_color:
+            raw_color = xml_color
     color = _css_color(raw_color, theme_color_map)
     if not color:
         color = "none"
@@ -913,11 +920,38 @@ def _color_from_color_parent(parent, theme_color_map):
         return None
     srgb = parent.find(".//a:srgbClr", namespaces=NS)
     if srgb is not None and srgb.get("val"):
-        return _hex_to_css(srgb.get("val"))
+        return _apply_color_modifiers(_hex_to_css(srgb.get("val")), srgb)
+    sys_color = parent.find(".//a:sysClr", namespaces=NS)
+    if sys_color is not None:
+        color = _hex_to_css(sys_color.get("lastClr")) or _css_color(
+            sys_color.get("val"), theme_color_map
+        )
+        return _apply_color_modifiers(color, sys_color)
     scheme = parent.find(".//a:schemeClr", namespaces=NS)
     if scheme is not None and scheme.get("val"):
-        return _css_color(scheme.get("val"), theme_color_map)
+        return _apply_color_modifiers(
+            _css_color(scheme.get("val"), theme_color_map), scheme
+        )
     return None
+
+
+def _apply_color_modifiers(color, node):
+    if not color or not color.startswith("#") or len(color) != 7 or node is None:
+        return color
+    try:
+        channels = [int(color[i:i + 2], 16) for i in (1, 3, 5)]
+    except ValueError:
+        return color
+
+    lum_mod = node.find("a:lumMod", namespaces=NS)
+    lum_off = node.find("a:lumOff", namespaces=NS)
+    mod = int(lum_mod.get("val", "100000")) / 100000.0 if lum_mod is not None else 1.0
+    off = int(lum_off.get("val", "0")) / 100000.0 if lum_off is not None else 0.0
+    adjusted = [
+        max(0, min(255, int(round(channel * mod + 255 * off))))
+        for channel in channels
+    ]
+    return "#{:02X}{:02X}{:02X}".format(*adjusted)
 
 
 def _first_color_from_xml(raw_xml, theme_color_map):
@@ -935,7 +969,7 @@ def _css_color(value, theme_color_map, default=None):
     if not value:
         return default
     text = str(value)
-    if text.startswith("#") and len(text) in {4, 7}:
+    if text.startswith("#") and len(text) in {4, 7} and _is_hex_color(text):
         return text
     if text.startswith("theme:"):
         text = text[len("theme:") :]
@@ -954,7 +988,15 @@ def _hex_to_css(value):
     if not value:
         return None
     value = str(value).strip().lstrip("#")
+    if len(value) not in {3, 6}:
+        return None
+    try:
+        int(value, 16)
+    except ValueError:
+        return None
     if len(value) == 6:
+        return "#{}".format(value)
+    if len(value) == 3:
         return "#{}".format(value)
     return None
 
@@ -1091,7 +1133,7 @@ def _is_hex_color(value):
     if not value:
         return False
     value = str(value).strip().lstrip("#")
-    if len(value) != 6:
+    if len(value) not in {3, 6}:
         return False
     try:
         int(value, 16)
@@ -1139,7 +1181,30 @@ def screenshot_html(html_path, output_png=None):
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         page.goto(file_url, wait_until="networkidle")
-        page.screenshot(path=str(output_png.resolve()), full_page=True)
+        page.add_style_tag(content="""
+            body, .deck { background: #fff !important; }
+            .slide { box-shadow: none !important; }
+        """)
+        slide_count = page.locator(".slide").count()
+        if slide_count == 1:
+            slide = page.locator(".slide").first
+            box = slide.bounding_box()
+            if box:
+                page.set_viewport_size({
+                    "width": max(int(box["width"]) + 2, 1),
+                    "height": max(int(box["height"]) + 2, 1),
+                })
+            slide.screenshot(path=str(output_png.resolve()))
+        else:
+            size = page.evaluate("""() => ({
+                width: Math.ceil(document.documentElement.scrollWidth),
+                height: Math.ceil(document.documentElement.scrollHeight)
+            })""")
+            page.set_viewport_size({
+                "width": max(int(size["width"]), 1),
+                "height": max(int(size["height"]), 1),
+            })
+            page.screenshot(path=str(output_png.resolve()), full_page=True)
         browser.close()
 
     return output_png

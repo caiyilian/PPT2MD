@@ -260,7 +260,7 @@ def _get_text_info(shape):
             font = run.font
             try:
                 if font.size:
-                    run_info["font_size"] = font.size
+                    run_info["font_size"] = int(font.size)
             except: pass
             try:
                 if font.bold:
@@ -626,11 +626,13 @@ def extract_alternate_content_shapes(slide):
 
             # Extract OMML and convert to LaTeX
             latex_parts = []
+            seen_latex = set()
             omml_list = find_omml_elements(sp)
             for omml in omml_list:
                 latex = convert_omml_to_latex(omml)
-                if latex:
+                if latex and latex not in seen_latex:
                     latex_parts.append(latex)
+                    seen_latex.add(latex)
 
             formula_text = ' '.join(latex_parts) if latex_parts else ''
 
